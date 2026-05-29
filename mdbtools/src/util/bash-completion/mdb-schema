@@ -1,0 +1,23 @@
+#-*- mode: shell-script;-*-
+_mdb_schema()
+{
+	local cur prev words cword split
+	_init_completion -s || return
+
+	if [[ "$prev" == -@(T|-table|N|-namespace) ]] ; then
+		return 0
+	fi
+
+	$split && return
+
+	if [[ "$cur" == -* ]]; then
+		COMPREPLY=($(compgen -W '$(_parse_help "$1")' -- "$cur"))
+		[[ $COMPREPLY == *= ]] && compopt -o nospace
+	elif [[ "$prev" == @(*mdb|*mdw|*accdb) ]]; then
+		COMPREPLY=( $( compgen -W 'access sybase oracle postgres mysql sqlite' -- "$cur" ) )
+	else
+		_filedir '@(mdb|mdw|accdb)'
+	fi
+	return 0
+} &&
+complete -F _mdb_schema mdb-schema

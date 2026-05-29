@@ -1,0 +1,192 @@
+[![Build Status](https://github.com/mdbtools/mdbtools/workflows/build/badge.svg)](https://github.com/mdbtools/mdbtools/actions)
+[![Build status](https://ci.appveyor.com/api/projects/status/22wwy5d0rrmk6e3c/branch/dev?svg=true)](https://ci.appveyor.com/project/evanmiller/mdbtools/branch/dev)
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/mdbtools.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:mdbtools)
+
+Welcome to the exciting world of MDB Tools! MDB Tools is a set of programs to
+help you extract data from Microsoft Access files in various settings. See the
+[NEWS](./NEWS) file for information about the latest release.
+
+## Components
+
+The major pieces of MDB Tools are:
+
+### libmdb
+
+The core library that allows access to MDB files programatically. See [mdbtools.h](./include/mdbtools.h.in) for the complete API.
+
+### libmdbsql
+
+Builds on libmdb to provide a SQL engine (aka Jet). See [mdbsql.h](./include/mdbsql.h) for the complete API.
+
+### utils
+
+Provides command line utilities, including:
+
+| Command | Description |
+| ------- | ----------- |
+| `mdb-ver` | Prints the version (JET 3 or 4) of an mdb file. |
+| `mdb-schema` | Prints DDL for the specified table. |
+| `mdb-export` | Export table to CSV or SQL formats. |
+| `mdb-json` | Export table to JSON format. |
+| `mdb-tables` | A simple dump of table names to be used with shell scripts. |
+| `mdb-count` | A simple count of number of rows in a table, to be used in shell scripts and ETL pipelines. |
+| `mdb-sql` | A simple SQL engine (also used by ODBC and gmdb). |
+| `mdb-queries` | List and print queries stored in the database. |
+| `mdb-hexdump`\* | (in [src/extras](./src/extras)) Simple hex dump utility to look at mdb files. |
+| `mdb-array`\* | Export data in an MDB database table to a C array. |
+| `mdb-header`\* | Generates a C header to be used in exporting mdb data to a C prog. |
+| `mdb-parsecsv`\* | Generates a C program given a CSV file made with mdb-export. |
+
+\* Deprecated
+
+See the man page of each program for usage instructions.
+
+The [src/util](./src/util) directory also contains a number of debugging tools, intended for developers. They are:
+
+| Command | Description |
+| ------- | ----------- |
+| `prcat` | Prints the catalog table from an mdb file. |
+| `prkkd` | Dump of information about design view data given the offset to it. |
+| `prtable` | Dump of a table definition. |
+| `prdata` | Dump of the data given a table name. |
+| `prole` | Dump of ole columns given a table name and sargs. |
+
+These tools are not installed on the host system.
+
+### odbc
+
+An ODBC driver for use with unixODBC or iODBC driver manager. Allows one to use MDB files with PHP for example.
+
+### gmdb2
+
+The Gnome MDB File Viewer and debugger. Recently ported to GTK+3 and moved to [mdbtools/gmdb2](https://github.com/mdbtools/gmdb2).
+
+## License
+
+Files in libmdb, libmdbsql, and libmdbodbc are licensed under LGPL and the
+utilities and gui program are under the GPL, see [COPYING.LIB](./COPYING.LIB)
+and [COPYING](./COPYING) files respectively.
+
+
+## Requirements
+
+First, you must have reasonably current installations of:
+
+* [libtool](https://www.gnu.org/software/libtool/)
+* [automake](https://www.gnu.org/software/automake/)
+* [autoconf](https://www.gnu.org/software/autoconf/) (version >= 2.64)
+
+If you want to build the SQL engine, you'll need
+[bison](https://www.gnu.org/software/bison/) (version >= 3.0) or
+[byacc](https://invisible-island.net/byacc/byacc.html), and
+[flex](https://github.com/westes/flex).
+
+If you want to build the ODBC driver, you'll need `unixodbc-dev` (version
+2.2.10 or above) or [iodbc](http://www.iodbc.org/dataspace/doc/iodbc/wiki/iodbcWiki/WelcomeVisitors).
+
+If you want to build man pages, you'll need
+[GNU awk](https://www.gnu.org/software/gawk/).
+
+
+## Installation
+
+Latest version is available at https://github.com/mdbtools/mdbtools
+
+### Debian
+
+```
+apt install mdbtools
+```
+
+### Homebrew
+
+```bash
+brew install mdbtools
+```
+
+### MacPorts
+
+```bash
+port install mdbtools
+```
+
+### From source
+
+If you have cloned the Git repository, you will first need to generate the
+`configure` file (skip this step if you have downloaded a formal release):
+
+```bash
+autoreconf -i -f
+```
+
+Then:
+
+```bash
+./configure
+```
+
+OR with mingw32 (--disable-shared --enable-static are optional as you knew):
+
+```bash
+./configure --host=x86_64-w64-mingw32 --disable-shared --enable-static
+```
+
+
+OR for a complete install (requires bison, flex, and unixODBC):
+
+```bash
+./configure --with-unixodbc=/usr/local
+```
+
+By default, MDB Tools is linked against the copy of
+[GLib](https://developer.gnome.org/glib/) returned by pkg-config. You can
+point to a different GLib installation using the `GLIB_CFLAGS` and `GLIB_LIBS`
+enivornment variables. Or, you can disable GLib entirely with the
+`--disable-glib` flag, in which case MDB Tools will use an internal
+implementation of GLib's functions.
+
+configure can be passed any of the following flags to turn on other 
+capabilities.  Note that the options `--with-unixodbc` and `--with-iodbc` are
+mutually exclusive.
+
+```
+--with-unixodbc  specifies the location of the unixODBC driver manager and 
+                 causes the unixODBC driver to be built.
+--with-iodbc     specifies the location of the iODBC driver manager and 
+                 causes the iODBC driver to be built.
+```
+
+By default, the ODBC driver will be installed as /usr/local/lib/odbc/libmdbodbc.so,
+with a Unicode-capable driver at /usr/local/lib/odbc/libmdbodbcW.so.
+
+The command `configure --help` will give you the list of mdbtools specific options.
+
+```bash
+make
+```
+
+Once MDB Tools has been compiled, libmdb.[so|a] will be in the src/libmdb 
+directory and the utility programs will be in the src/util directory.
+
+You can then install (to /usr/local by default) by running the following as root:
+
+```bash
+make install
+```
+
+Some systems will also need the ld cache to be updated after installation;
+You can do that running:
+
+```bash 
+ldconfig
+```
+
+## Hacking
+
+If you are interested in helping, read the [HACKING](./HACKING.md) file for a description of 
+where the code stands and what has been gleened of the file format.
+
+## Contact
+
+Please send bug reports to the new github repository.
+https://github.com/mdbtools/mdbtools/issues

@@ -1,0 +1,12 @@
+#-*- mode: shell-script;-*-
+_mdb_hexdump()
+{
+	local cur prev words cword
+	_init_completion || return
+
+	if (( $cword == 1 )); then
+		_filedir '@(mdb|mdw|accdb)'
+	fi
+	return 0
+} &&
+complete -F _mdb_hexdump mdb-hexdump

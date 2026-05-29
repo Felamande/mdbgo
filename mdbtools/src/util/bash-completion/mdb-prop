@@ -1,0 +1,23 @@
+#-*- mode: shell-script;-*-
+_mdb_prop()
+{
+	local cur prev words cword
+	_init_completion || return
+
+	if (( $cword == 1 )); then
+		_filedir '@(mdb|mdw|accdb)'
+	elif (( $cword == 2 )); then
+		local dbname
+		local tablenames
+		dbname=$prev
+		__expand_tilde_by_ref dbname
+		local IFS=$'\n'
+		tablenames="$(eval mdb-tables -S -1 "${dbname}" 2>/dev/null)"
+		compopt -o filenames
+		COMPREPLY=( $( compgen -W '${tablenames}' -- "$cur" ) )
+	elif (( $cword == 3 )); then
+		COMPREPLY=( $( compgen -W 'Lv LvProp LvModule LvExtra' -- "$cur" ) )
+	fi
+	return 0
+} &&
+complete -F _mdb_prop mdb-prop
