@@ -25,19 +25,7 @@ mdbgo parses Access database files directly by embedding the open-source [mdbtoo
 go get github.com/Felamande/mdbgo
 ```
 
-A C compiler (gcc/clang/MSVC) is required since the project uses cgo. No additional C libraries need to be installed — mdbtools is compiled from the embedded submodule.
-
-### Clone with submodule
-
-```bash
-git clone --recurse-submodules https://github.com/Felamande/mdbgo.git
-```
-
-If already cloned without submodules:
-
-```bash
-git submodule update --init --recursive
-```
+A C compiler (gcc/clang/MSVC) is required since the project uses cgo. No additional C libraries need to be installed — mdbtools is compiled from the embedded submodule. Better use zig cc.
 
 ## Usage
 
