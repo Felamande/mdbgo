@@ -1,2 +1,2 @@
-#include "../../mdbtools/src/libmdb/worktable.c"
+#include "../mdbtools/src/libmdb/worktable.c"
 

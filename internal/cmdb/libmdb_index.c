@@ -1,2 +1,2 @@
-#include "../../mdbtools/src/libmdb/index.c"
+#include "../mdbtools/src/libmdb/index.c"
 

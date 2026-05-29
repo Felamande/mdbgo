@@ -1,2 +1,2 @@
-#include "../../mdbtools/src/libmdb/like.c"
+#include "../mdbtools/src/libmdb/like.c"
 

@@ -1,2 +1,2 @@
-#include "../../mdbtools/src/libmdb/props.c"
+#include "../mdbtools/src/libmdb/props.c"
 

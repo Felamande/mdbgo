@@ -1,2 +1,2 @@
-#include "../../mdbtools/src/libmdb/sargs.c"
+#include "../mdbtools/src/libmdb/sargs.c"
 
