@@ -136,4 +136,9 @@ mdbtools source is included as a git submodule and compiled in-tree via stub `.c
 
 ## License
 
-This project wraps [mdbtools](https://github.com/mdbtools/mdbtools), which is licensed under LGPL. See the mdbtools submodule for details.
+The Go code in this repository is licensed under the [MIT License](LICENSE).
+
+This project embeds [mdbtools](https://github.com/mdbtools/mdbtools), which
+is licensed under the
+[GNU Library General Public License v2 or later](THIRDPARTY-LICENSES.md).
+See `internal/mdbtools/COPYING.LIB` for the full LGPL text.
