@@ -9,33 +9,21 @@ func (mdb *MdbHandle) ReadNextDpg(table *MdbTableDef) error {
 
 	// Try fast path using usage map
 	nextPg := mapFindNext(mdb, table.UsageMap, table.MapSz, int(table.CurPhysPg))
-	if nextPg < 0 {
-		// Unknown map type — fall through to brute force
-		nextPg = 0
-	}
-	if nextPg == 0 {
-		return fmt.Errorf("puredb: no more data pages (EOF)")
-	}
-	if nextPg == int(table.CurPhysPg) {
-		return fmt.Errorf("puredb: infinite loop detected in page traversal")
-	}
-
-	if err := mdb.readPage(uint32(nextPg)); err != nil {
-		return fmt.Errorf("puredb: error reading page %d: %w", nextPg, err)
+	if nextPg > 0 && nextPg != int(table.CurPhysPg) {
+		if err := mdb.readPage(uint32(nextPg)); err != nil {
+			return fmt.Errorf("puredb: error reading page %d: %w", nextPg, err)
+		}
+		table.CurPhysPg = uint32(nextPg)
+		if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {
+			return nil
+		}
 	}
 
-	table.CurPhysPg = uint32(nextPg)
-
-	// Verify this page belongs to our table
-	if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {
-		return nil
-	}
-
-	// Page doesn't match — fall back to brute force scan
+	// Fall back to brute force scan (handles empty/broken usage maps)
 	for {
 		table.CurPhysPg++
 		if err := mdb.readPage(table.CurPhysPg); err != nil {
-			return err
+			return fmt.Errorf("puredb: no more data pages (EOF)")
 		}
 		if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {
 			return nil
