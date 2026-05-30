@@ -112,97 +112,31 @@ func (mdb *MdbHandle) AddRowToTempTable(table *MdbTableDef, rowData []byte, rowS
 	table.TempTablePages[len(table.TempTablePages)-1] = curPage
 }
 
-// PackRow packs fields into a row buffer for a temp table.
+// PackRow packs fields into a Jet4 row buffer for a temp table.
+// The row format matches what CrackRow (mdb_crack_row) expects:
+//
+//	[2 bytes: total col count] [fixed data] [var data] [var offsets+count] [null mask]
 func (mdb *MdbHandle) PackRow(table *MdbTableDef, rowBuf []byte, numFields int, fields []MdbField) int {
-	pos := 0
-
-	// Number of variable columns
+	// Count variable columns via the table definition
 	varColCount := 0
+	fixedColCount := 0
 	for _, col := range table.Columns {
-		if !col.IsFixed {
+		if col.IsFixed {
+			fixedColCount++
+		} else {
 			varColCount++
 		}
 	}
-	rowBuf[pos] = byte(varColCount)
-	pos++
+	totalCols := varColCount + fixedColCount
 
-	// Null mask placeholder (will be filled later)
-	nullMaskSize := (table.NumCols + 7) / 8
-	nullMaskPos := pos
-	for i := 0; i < nullMaskSize; i++ {
-		rowBuf[pos] = 0
-		pos++
-	}
+	// Fixed column data starts at offset 2 (after 2-byte column count header)
+	pos := 2
 
-	// Variable column offset table placeholder
-	varOffsetPos := pos
-	pos += varColCount
-
-	// Write variable column data
-	varOffsetIdx := 0
-	for _, col := range table.Columns {
-		if col.IsFixed {
-			continue
-		}
-
-		// Find matching field
-		var field *MdbField
-		for fi := 0; fi < numFields; fi++ {
-			if fields[fi].ColNum == col.ColNum {
-				field = &fields[fi]
-				break
-			}
-		}
-		if field == nil {
-			continue
-		}
-
-		// Set null bit if needed
-		if field.IsNull {
-			byteNum := (col.RowColNum - 1) / 8
-			bitNum := (col.RowColNum - 1) % 8
-			rowBuf[nullMaskPos+byteNum] &^= (1 << bitNum) // clear bit = null
-		} else {
-			byteNum := (col.RowColNum - 1) / 8
-			bitNum := (col.RowColNum - 1) % 8
-			rowBuf[nullMaskPos+byteNum] |= (1 << bitNum) // set bit = not null
-		}
-
-		// Set variable offset
-		if varOffsetIdx < varColCount {
-			off := pos - varOffsetPos - varColCount
-			rowBuf[varOffsetPos+varOffsetIdx*2] = byte(off & 0xFF)
-			rowBuf[varOffsetPos+varOffsetIdx*2+1] = byte((off >> 8) & 0xFF)
-			varOffsetIdx++
-		}
-
-		// Copy data
-		if !field.IsNull && field.Value != nil {
-			copy(rowBuf[pos:], field.Value)
-			pos += field.Siz
-		}
-	}
-
-	// Fixed column data
-	fixedNum := 0
-	for _, col := range table.Columns {
-		if col.IsFixed {
-			fixedNum++
-		}
-	}
-
-	// Fixed null mask
-	fixedNullPos := pos
-	for i := 0; i < nullMaskSize; i++ {
-		rowBuf[pos] = 0
-		pos++
-	}
-
+	// Write fixed column data
 	for _, col := range table.Columns {
 		if !col.IsFixed {
 			continue
 		}
-
 		var field *MdbField
 		for fi := 0; fi < numFields; fi++ {
 			if fields[fi].ColNum == col.ColNum {
@@ -210,25 +144,107 @@ func (mdb *MdbHandle) PackRow(table *MdbTableDef, rowBuf []byte, numFields int, 
 				break
 			}
 		}
-		if field == nil {
-			continue
-		}
-
-		if field.IsNull {
-			byteNum := (col.RowColNum - 1) / 8
-			bitNum := (col.RowColNum - 1) % 8
-			rowBuf[fixedNullPos+byteNum] &^= (1 << bitNum)
-		} else {
-			byteNum := (col.RowColNum - 1) / 8
-			bitNum := (col.RowColNum - 1) % 8
-			rowBuf[fixedNullPos+byteNum] |= (1 << bitNum)
-
-			if field.Value != nil {
-				copy(rowBuf[pos:], field.Value)
-				pos += field.Siz
+		if field == nil || field.IsNull || field.Value == nil {
+			for range col.ColSize {
+				rowBuf[pos] = 0
+				pos++
 			}
+		} else {
+			copy(rowBuf[pos:], field.Value)
+			pos += len(field.Value)
 		}
 	}
+
+	// Write variable column data + build offset table
+	varOffsets := make([]int, varColCount+1)
+	var varFields []*MdbField
+	for _, col := range table.Columns {
+		if col.IsFixed {
+			continue
+		}
+		var field *MdbField
+		for fi := 0; fi < numFields; fi++ {
+			if fields[fi].ColNum == col.ColNum {
+				field = &fields[fi]
+				break
+			}
+		}
+		varFields = append(varFields, field)
+	}
+
+	
+	for i, field := range varFields {
+		varOffsets[i] = pos
+		if field != nil && !field.IsNull && field.Value != nil {
+			copy(rowBuf[pos:], field.Value)
+			pos += len(field.Value)
+		}
+	}
+	varOffsets[varColCount] = pos
+
+	// End-of-row layout: [offsets reversed] [varCount(2B)] [nullMask]
+	nullMaskSize := (totalCols + 7) / 8
+
+	// Variable column offset table (2 bytes each, offset[n] first, offset[0] closest to varCount)
+	for i := varColCount; i >= 0; i-- {
+		rowBuf[pos] = byte(varOffsets[i] & 0xFF)
+		pos++
+		rowBuf[pos] = byte((varOffsets[i] >> 8) & 0xFF)
+		pos++
+	}
+
+	// Variable column count at end (2 bytes for Jet4)
+	rowBuf[pos] = byte(varColCount & 0xFF)
+	pos++
+	rowBuf[pos] = byte((varColCount >> 8) & 0xFF)
+	pos++
+
+	// Null mask (at the very end)
+	nullStart := pos
+	for i := 0; i < nullMaskSize; i++ {
+		rowBuf[pos] = 0
+		pos++
+	}
+
+	// Set null mask bits: 1 = not null
+	for _, col := range table.Columns {
+		fieldIdx := col.ColNum
+		if fieldIdx >= totalCols {
+			continue
+		}
+		var isNotNull bool
+		if col.IsFixed {
+			for fi := 0; fi < numFields; fi++ {
+				if fields[fi].ColNum == col.ColNum {
+					isNotNull = !fields[fi].IsNull
+					break
+				}
+			}
+		} else {
+			vi := 0
+			for _, c := range table.Columns {
+				if c.IsFixed {
+					continue
+				}
+				if c.ColNum == col.ColNum {
+					break
+				}
+				vi++
+			}
+			if vi < len(varFields) && varFields[vi] != nil {
+				isNotNull = !varFields[vi].IsNull
+			}
+		}
+		if isNotNull {
+			byteNum := col.ColNum / 8
+			bitNum := col.ColNum % 8
+			rowBuf[nullStart+byteNum] |= (1 << bitNum)
+		}
+	}
+
+	// Write 2-byte column count header at the very start
+	rowBuf[0] = byte(totalCols & 0xFF)
+	rowBuf[1] = byte((totalCols >> 8) & 0xFF)
 
 	return pos
 }
@@ -244,6 +260,7 @@ func (mdb *MdbHandle) ListTables(sql *SQL) error {
 	FillTempCol(col, "Tables", 30, TypeText, false)
 	col.RowColNum = 1
 	mdb.TempTableAddCol(ttable, col)
+	sql.AddColumn("Tables")
 
 	var fields [1]MdbField
 	rowBuf := make([]byte, mdb.fmt.PgSize)
@@ -280,16 +297,19 @@ func (mdb *MdbHandle) DescribeTable(sql *SQL, tableName string) error {
 	FillTempCol(col1, "Column Name", 30, TypeText, false)
 	col1.RowColNum = 1
 	mdb.TempTableAddCol(ttable, col1)
+		sql.AddColumn("Column Name")
 
 	col2 := &MdbColumn{}
 	FillTempCol(col2, "Type", 20, TypeText, false)
 	col2.RowColNum = 2
 	mdb.TempTableAddCol(ttable, col2)
+		sql.AddColumn("Type")
 
 	col3 := &MdbColumn{}
 	FillTempCol(col3, "Size", 10, TypeText, false)
 	col3.RowColNum = 3
 	mdb.TempTableAddCol(ttable, col3)
+		sql.AddColumn("Size")
 
 	var fields [3]MdbField
 	rowBuf := make([]byte, mdb.fmt.PgSize)

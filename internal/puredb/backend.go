@@ -80,14 +80,14 @@ func colBindSize(col *MdbColumn) int {
 	case TypeNumeric:
 		return 30
 	case TypeText:
-		n := col.ColSize
+		n := col.ColSize * 3 // UCS-2 to UTF-8 can triple for CJK
 		if n < 64 { n = 64 }
-		if n > 4096 { n = 4096 }
+		if n > 8192 { n = 8192 }
 		return n
 	case TypeMemo:
 		n := col.ColSize
-		if n < 256 { n = 256 }
-		if n > 16384 { n = 16384 }
+		if n < 4096 { n = 4096 }
+		if n > 65536 { n = 65536 }
 		return n
 	case TypeBinary, TypeOLE:
 		n := col.ColSize + MemoOverhead
