@@ -1,4 +1,4 @@
-package mdbtool
+package puredb
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Felamande/mdbgo/internal/cmdb"
+	backend "github.com/Felamande/mdbgo/internal/puredb"
 )
 
 func TestDriverOpenAndUnsupportedOperations(t *testing.T) {
@@ -160,11 +160,11 @@ func TestRowsWithoutHandle(t *testing.T) {
 }
 
 func TestColumnTypeHelpers(t *testing.T) {
-	rows := &Rows{info: []cmdb.Column{
-		{Name: "id", DatabaseType: "INTEGER", Type: cmdb.TypeLongInt},
-		{Name: "name", DatabaseType: "Text", Type: cmdb.TypeText, Size: 40},
-		{Name: "created", DatabaseType: "DateTime", Type: cmdb.TypeDateTime},
-		{Name: "payload", DatabaseType: "Binary", Type: cmdb.TypeBinary, Size: 8},
+	rows := &Rows{info: []backend.Column{
+		{Name: "id", DatabaseType: "INTEGER", Type: backend.TypeLongInt},
+		{Name: "name", DatabaseType: "Text", Type: backend.TypeText, Size: 40},
+		{Name: "created", DatabaseType: "DateTime", Type: backend.TypeDateTime},
+		{Name: "payload", DatabaseType: "Binary", Type: backend.TypeBinary, Size: 8},
 	}}
 	if got := rows.ColumnTypeDatabaseTypeName(1); got != "Text" {
 		t.Fatalf("ColumnTypeDatabaseTypeName = %q, want Text", got)

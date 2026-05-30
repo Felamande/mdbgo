@@ -1,4 +1,6 @@
-package mdbtool
+// Package puredb provides a pure Go database/sql driver for Microsoft Access (.mdb) files.
+// It registers under the name "mdb" and requires no CGo or external C libraries.
+package puredb
 
 import (
 	"context"
@@ -11,14 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Felamande/mdbgo/internal/cmdb"
+	backend "github.com/Felamande/mdbgo/internal/puredb"
 )
 
-const DriverName = "mdb"
+const DriverName = "gomdb"
 
 func init() {
 	sql.Register(DriverName, &Driver{})
 }
+
+// --- Driver ---
 
 type Driver struct{}
 
@@ -28,6 +32,8 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 	}
 	return &Conn{path: name}, nil
 }
+
+// --- Conn ---
 
 type Conn struct {
 	path string
@@ -40,10 +46,7 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	return &Stmt{conn: c, query: query}, nil
 }
 
-func (c *Conn) Close() error {
-	return nil
-}
-
+func (c *Conn) Close() error  { return nil }
 func (c *Conn) Begin() (driver.Tx, error) {
 	return nil, errors.New("mdb: transactions are not supported")
 }
@@ -56,7 +59,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if err != nil {
 		return nil, err
 	}
-	h, err := cmdb.OpenQuery(c.path, expanded)
+	h, err := backend.OpenQuery(c.path, expanded)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +79,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	h, err := cmdb.OpenQuery(c.path, "LIST TABLES")
+	h, err := backend.OpenQuery(c.path, "LIST TABLES")
 	if err != nil {
 		return err
 	}
@@ -89,18 +92,15 @@ var _ driver.QueryerContext = (*Conn)(nil)
 var _ driver.ExecerContext = (*Conn)(nil)
 var _ driver.Pinger = (*Conn)(nil)
 
+// --- Stmt ---
+
 type Stmt struct {
 	conn  *Conn
 	query string
 }
 
-func (s *Stmt) Close() error {
-	return nil
-}
-
-func (s *Stmt) NumInput() int {
-	return countPlaceholders(s.query)
-}
+func (s *Stmt) Close() error  { return nil }
+func (s *Stmt) NumInput() int { return countPlaceholders(s.query) }
 
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return nil, errors.New("mdb: exec is not supported; the driver is read-only")
@@ -126,10 +126,12 @@ var _ driver.Stmt = (*Stmt)(nil)
 var _ driver.StmtQueryContext = (*Stmt)(nil)
 var _ driver.StmtExecContext = (*Stmt)(nil)
 
+// --- Rows ---
+
 type Rows struct {
-	h      *cmdb.Query
+	h      *backend.Query
 	cols   []string
-	info   []cmdb.Column
+	info   []backend.Column
 	closed bool
 }
 
@@ -179,35 +181,31 @@ func (r *Rows) ColumnTypeLength(index int) (int64, bool) {
 		return 0, false
 	}
 	switch r.info[index].Type {
-	case cmdb.TypeText, cmdb.TypeMemo, cmdb.TypeBinary, cmdb.TypeOLE:
+	case backend.TypeText, backend.TypeMemo, backend.TypeBinary, backend.TypeOLE:
 		return r.info[index].Size, true
-	default:
-		return 0, false
 	}
+	return 0, false
 }
 
-func (r *Rows) ColumnTypeNullable(index int) (bool, bool) {
-	return true, false
-}
+func (r *Rows) ColumnTypeNullable(index int) (bool, bool) { return true, false }
 
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	if index < 0 || index >= len(r.info) {
 		return reflect.TypeOf("")
 	}
 	switch r.info[index].Type {
-	case cmdb.TypeBool:
+	case backend.TypeBool:
 		return reflect.TypeOf(false)
-	case cmdb.TypeByte, cmdb.TypeInt, cmdb.TypeLongInt, cmdb.TypeComplex:
+	case backend.TypeByte, backend.TypeInt, backend.TypeLongInt, backend.TypeComplex:
 		return reflect.TypeOf(int64(0))
-	case cmdb.TypeMoney, cmdb.TypeFloat, cmdb.TypeDouble:
+	case backend.TypeMoney, backend.TypeFloat, backend.TypeDouble:
 		return reflect.TypeOf(float64(0))
-	case cmdb.TypeDateTime:
+	case backend.TypeDateTime:
 		return reflect.TypeOf(time.Time{})
-	case cmdb.TypeBinary, cmdb.TypeOLE:
+	case backend.TypeBinary, backend.TypeOLE:
 		return reflect.TypeOf([]byte{})
-	default:
-		return reflect.TypeOf("")
 	}
+	return reflect.TypeOf("")
 }
 
 func (r *Rows) value(index int) driver.Value {
@@ -216,21 +214,21 @@ func (r *Rows) value(index int) driver.Value {
 	}
 	raw := r.h.Value(index)
 	switch r.info[index].Type {
-	case cmdb.TypeBool:
+	case backend.TypeBool:
 		return raw == "1" || strings.EqualFold(raw, "true")
-	case cmdb.TypeByte, cmdb.TypeInt, cmdb.TypeLongInt, cmdb.TypeComplex:
-		if v, ok := cmdb.ParseInt(raw); ok {
+	case backend.TypeByte, backend.TypeInt, backend.TypeLongInt, backend.TypeComplex:
+		if v, ok := backend.ParseInt(raw); ok {
 			return v
 		}
-	case cmdb.TypeMoney, cmdb.TypeFloat, cmdb.TypeDouble:
-		if v, ok := cmdb.ParseFloat(raw); ok {
+	case backend.TypeMoney, backend.TypeFloat, backend.TypeDouble:
+		if v, ok := backend.ParseFloat(raw); ok {
 			return v
 		}
-	case cmdb.TypeDateTime:
+	case backend.TypeDateTime:
 		if v, ok := r.h.DateTimeValue(index); ok {
 			return v
 		}
-	case cmdb.TypeBinary:
+	case backend.TypeBinary:
 		return r.h.BinaryValue(index)
 	}
 	return raw
@@ -242,12 +240,12 @@ var _ driver.RowsColumnTypeLength = (*Rows)(nil)
 var _ driver.RowsColumnTypeNullable = (*Rows)(nil)
 var _ driver.RowsColumnTypeScanType = (*Rows)(nil)
 
+// --- Query utilities ---
+
 func interpolateQuery(query string, args []driver.NamedValue) (string, error) {
 	var b strings.Builder
 	argIndex := 0
-	inSingle := false
-	inDouble := false
-	inBracket := false
+	inSingle, inDouble, inBracket := false, false, false
 
 	for i := 0; i < len(query); i++ {
 		ch := query[i]
@@ -308,9 +306,7 @@ func interpolateQuery(query string, args []driver.NamedValue) (string, error) {
 
 func countPlaceholders(query string) int {
 	count := 0
-	inSingle := false
-	inDouble := false
-	inBracket := false
+	inSingle, inDouble, inBracket := false, false, false
 	for i := 0; i < len(query); i++ {
 		ch := query[i]
 		switch ch {

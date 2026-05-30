@@ -1,4 +1,4 @@
-package mdbtool
+package puredb
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Felamande/mdbgo/internal/cmdb"
+	backend "github.com/Felamande/mdbgo/internal/puredb"
 )
 
 // createTypedTestMDB creates an MDB with a table covering all Access column types.
@@ -34,7 +34,7 @@ import (
 // Note: Access BIT fields do not support NULL — NULL inserts become FALSE.
 
 func TestColumnTypeExactMatch(t *testing.T) {
-	path := "testdata/typed.mdb"
+	path := "../../testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestColumnTypeExactMatch(t *testing.T) {
 }
 
 func TestTypedValuesExactMatch(t *testing.T) {
-	path := "testdata/typed.mdb"
+	path := "../../testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -312,7 +312,7 @@ func TestTypedValuesExactMatch(t *testing.T) {
 }
 
 func TestNullValuesAllColumns(t *testing.T) {
-	path := "testdata/nulltest.mdb"
+	path := "../../testdata/nulltest.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -423,7 +423,7 @@ func TestNullValuesAllColumns(t *testing.T) {
 }
 
 func TestDatabaseTypeNamesAllTypes(t *testing.T) {
-	path := "testdata/typed.mdb"
+	path := "../../testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -484,7 +484,7 @@ func TestDatabaseTypeNamesAllTypes(t *testing.T) {
 }
 
 func TestColumnTypeLengthReported(t *testing.T) {
-	path := "testdata/typed.mdb"
+	path := "../../testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -520,7 +520,7 @@ func TestColumnTypeLengthReported(t *testing.T) {
 }
 
 func TestScanIntoInterfaceSlice(t *testing.T) {
-	path := "testdata/typed.mdb"
+	path := "../../testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -556,7 +556,7 @@ func TestScanIntoInterfaceSlice(t *testing.T) {
 }
 
 func TestChineseCharacters(t *testing.T) {
-	path := "testdata/chinese.mdb"
+	path := "../../testdata/chinese.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -627,7 +627,7 @@ func TestChineseCharacters(t *testing.T) {
 }
 
 func TestChineseCharacterTypes(t *testing.T) {
-	path := "testdata/chinese.mdb"
+	path := "../../testdata/chinese.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -692,7 +692,7 @@ func TestChineseCharacterTypes(t *testing.T) {
 	}
 }
 
-// TestColumnTypeScanTypeAllMappings verifies all cmdb.Type → reflect.Type mappings
+// TestColumnTypeScanTypeAllMappings verifies all backend.Type → reflect.Type mappings
 // using synthetic Rows (no MDB file needed).
 func TestColumnTypeScanTypeAllMappings(t *testing.T) {
 	tests := []struct {
@@ -700,26 +700,26 @@ func TestColumnTypeScanTypeAllMappings(t *testing.T) {
 		colType  int
 		wantType reflect.Type
 	}{
-		{"TypeBool", cmdb.TypeBool, reflect.TypeOf(false)},
-		{"TypeByte", cmdb.TypeByte, reflect.TypeOf(int64(0))},
-		{"TypeInt", cmdb.TypeInt, reflect.TypeOf(int64(0))},
-		{"TypeLongInt", cmdb.TypeLongInt, reflect.TypeOf(int64(0))},
-		{"TypeComplex", cmdb.TypeComplex, reflect.TypeOf(int64(0))},
-		{"TypeMoney", cmdb.TypeMoney, reflect.TypeOf(float64(0))},
-		{"TypeFloat", cmdb.TypeFloat, reflect.TypeOf(float64(0))},
-		{"TypeDouble", cmdb.TypeDouble, reflect.TypeOf(float64(0))},
-		{"TypeDateTime", cmdb.TypeDateTime, reflect.TypeOf(time.Time{})},
-		{"TypeBinary", cmdb.TypeBinary, reflect.TypeOf([]byte{})},
-		{"TypeOLE", cmdb.TypeOLE, reflect.TypeOf([]byte{})},
-		{"TypeText", cmdb.TypeText, reflect.TypeOf("")},
-		{"TypeMemo", cmdb.TypeMemo, reflect.TypeOf("")},
-		{"TypeRepID", cmdb.TypeRepID, reflect.TypeOf("")},
-		{"TypeNumeric", cmdb.TypeNumeric, reflect.TypeOf("")},
+		{"TypeBool", backend.TypeBool, reflect.TypeOf(false)},
+		{"TypeByte", backend.TypeByte, reflect.TypeOf(int64(0))},
+		{"TypeInt", backend.TypeInt, reflect.TypeOf(int64(0))},
+		{"TypeLongInt", backend.TypeLongInt, reflect.TypeOf(int64(0))},
+		{"TypeComplex", backend.TypeComplex, reflect.TypeOf(int64(0))},
+		{"TypeMoney", backend.TypeMoney, reflect.TypeOf(float64(0))},
+		{"TypeFloat", backend.TypeFloat, reflect.TypeOf(float64(0))},
+		{"TypeDouble", backend.TypeDouble, reflect.TypeOf(float64(0))},
+		{"TypeDateTime", backend.TypeDateTime, reflect.TypeOf(time.Time{})},
+		{"TypeBinary", backend.TypeBinary, reflect.TypeOf([]byte{})},
+		{"TypeOLE", backend.TypeOLE, reflect.TypeOf([]byte{})},
+		{"TypeText", backend.TypeText, reflect.TypeOf("")},
+		{"TypeMemo", backend.TypeMemo, reflect.TypeOf("")},
+		{"TypeRepID", backend.TypeRepID, reflect.TypeOf("")},
+		{"TypeNumeric", backend.TypeNumeric, reflect.TypeOf("")},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rows := &Rows{info: []cmdb.Column{
+			rows := &Rows{info: []backend.Column{
 				{Name: "col", Type: tt.colType},
 			}}
 			got := rows.ColumnTypeScanType(0)
@@ -739,25 +739,25 @@ func TestColumnTypeDatabaseTypeNameAllTypes(t *testing.T) {
 		dbType   string
 		wantName string
 	}{
-		{"TypeBool", cmdb.TypeBool, "Boolean", "Boolean"},
-		{"TypeByte", cmdb.TypeByte, "Byte", "Byte"},
-		{"TypeInt", cmdb.TypeInt, "Integer", "Integer"},
-		{"TypeLongInt", cmdb.TypeLongInt, "Long Integer", "Long Integer"},
-		{"TypeMoney", cmdb.TypeMoney, "Currency", "Currency"},
-		{"TypeFloat", cmdb.TypeFloat, "Single", "Single"},
-		{"TypeDouble", cmdb.TypeDouble, "Double", "Double"},
-		{"TypeDateTime", cmdb.TypeDateTime, "DateTime", "DateTime"},
-		{"TypeBinary", cmdb.TypeBinary, "Binary", "Binary"},
-		{"TypeText", cmdb.TypeText, "Text", "Text"},
-		{"TypeOLE", cmdb.TypeOLE, "OLE", "OLE"},
-		{"TypeMemo", cmdb.TypeMemo, "Memo/Hyperlink", "Memo/Hyperlink"},
-		{"TypeRepID", cmdb.TypeRepID, "Replication ID", "Replication ID"},
-		{"TypeNumeric", cmdb.TypeNumeric, "Numeric", "Numeric"},
+		{"TypeBool", backend.TypeBool, "Boolean", "Boolean"},
+		{"TypeByte", backend.TypeByte, "Byte", "Byte"},
+		{"TypeInt", backend.TypeInt, "Integer", "Integer"},
+		{"TypeLongInt", backend.TypeLongInt, "Long Integer", "Long Integer"},
+		{"TypeMoney", backend.TypeMoney, "Currency", "Currency"},
+		{"TypeFloat", backend.TypeFloat, "Single", "Single"},
+		{"TypeDouble", backend.TypeDouble, "Double", "Double"},
+		{"TypeDateTime", backend.TypeDateTime, "DateTime", "DateTime"},
+		{"TypeBinary", backend.TypeBinary, "Binary", "Binary"},
+		{"TypeText", backend.TypeText, "Text", "Text"},
+		{"TypeOLE", backend.TypeOLE, "OLE", "OLE"},
+		{"TypeMemo", backend.TypeMemo, "Memo/Hyperlink", "Memo/Hyperlink"},
+		{"TypeRepID", backend.TypeRepID, "Replication ID", "Replication ID"},
+		{"TypeNumeric", backend.TypeNumeric, "Numeric", "Numeric"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rows := &Rows{info: []cmdb.Column{
+			rows := &Rows{info: []backend.Column{
 				{Name: "col", Type: tt.colType, DatabaseType: tt.dbType},
 			}}
 			got := rows.ColumnTypeDatabaseTypeName(0)

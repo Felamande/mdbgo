@@ -1,4 +1,4 @@
-package mdbtool
+package cmdb
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestDriverReadsCreatedMDB(t *testing.T) {
-	path := "testdata/people.mdb"
+	path := "../../testdata/people.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
