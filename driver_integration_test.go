@@ -5,23 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 )
 
 func TestDriverReadsCreatedMDB(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "people.mdb")
-	if err := createTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/people.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -109,54 +100,3 @@ func TestDriverReadsCreatedMDB(t *testing.T) {
 }
 
 var errMDBProviderUnavailable = errors.New("mdb creation provider unavailable")
-
-func createTestMDB(path string) error {
-	script := fmt.Sprintf(`
-$ErrorActionPreference = 'Stop'
-$path = %s
-$providers = @(
-  @{ Name = 'Microsoft.ACE.OLEDB.16.0'; Engine = 5 },
-  @{ Name = 'Microsoft.ACE.OLEDB.12.0'; Engine = 5 },
-  @{ Name = 'Microsoft.Jet.OLEDB.4.0'; Engine = 5 }
-)
-
-$lastError = $null
-foreach ($provider in $providers) {
-  try {
-    $catalog = New-Object -ComObject ADOX.Catalog
-    $createConnection = 'Provider=' + $provider.Name + ';Data Source=' + $path + ';Jet OLEDB:Engine Type=' + $provider.Engine
-    $catalog.Create($createConnection)
-
-    $connection = New-Object -ComObject ADODB.Connection
-    $connection.Open('Provider=' + $provider.Name + ';Data Source=' + $path)
-    $connection.Execute('CREATE TABLE people (id INTEGER, name TEXT(40), active BIT, nickname TEXT(40), created_at DATETIME)')
-    $connection.Execute("INSERT INTO people (id, name, active, nickname, created_at) VALUES (1, 'Ada', TRUE, 'Countess', #2026-05-28#)")
-    $connection.Execute("INSERT INTO people (id, name, active, nickname, created_at) VALUES (2, 'Grace', FALSE, NULL, #2026-05-28#)")
-    $connection.Close()
-    exit 0
-  } catch {
-    $lastError = $_.Exception.Message
-    if (Test-Path -LiteralPath $path) {
-      Remove-Item -LiteralPath $path -Force
-    }
-  }
-}
-
-[Console]::Error.WriteLine('No usable Access OLE DB provider found: ' + $lastError)
-exit 42
-`, psSingleQuote(path))
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) && exitErr.ExitCode() == 42 {
-		return fmt.Errorf("%w: %s", errMDBProviderUnavailable, strings.TrimSpace(string(out)))
-	}
-	return fmt.Errorf("create mdb: %w: %s", err, strings.TrimSpace(string(out)))
-}
-
-func psSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}

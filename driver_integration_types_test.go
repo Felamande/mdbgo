@@ -3,10 +3,6 @@ package mdbtool
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
-	"os"
-	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,204 +25,16 @@ import (
 //	DATETIME   → "DateTime"
 //	TEXT(n)    → "Text"          (Unicode, length reported as 2*n bytes)
 //	MEMO       → "Memo/Hyperlink"
-func createTypedTestMDB(path string) error {
-	script := fmt.Sprintf(`
-$ErrorActionPreference = 'Stop'
-$path = %s
-$providers = @(
-  @{ Name = 'Microsoft.ACE.OLEDB.16.0'; Engine = 5 },
-  @{ Name = 'Microsoft.ACE.OLEDB.12.0'; Engine = 5 },
-  @{ Name = 'Microsoft.Jet.OLEDB.4.0'; Engine = 5 }
-)
-
-$lastError = $null
-foreach ($provider in $providers) {
-  try {
-    $catalog = New-Object -ComObject ADOX.Catalog
-    $createConnection = 'Provider=' + $provider.Name + ';Data Source=' + $path + ';Jet OLEDB:Engine Type=' + $provider.Engine
-    $catalog.Create($createConnection)
-
-    $connection = New-Object -ComObject ADODB.Connection
-    $connection.Open('Provider=' + $provider.Name + ';Data Source=' + $path)
-    $connection.Execute('CREATE TABLE typed (id LONG, flag BIT, val_byte BYTE, val_short SHORT, val_int INTEGER, val_long LONG, val_single SINGLE, val_double DOUBLE, val_currency CURRENCY, val_datetime DATETIME, val_text TEXT(50), val_memo MEMO)')
-    $connection.Execute("INSERT INTO typed (id, flag, val_byte, val_short, val_int, val_long, val_single, val_double, val_currency, val_datetime, val_text, val_memo) VALUES (1, TRUE, 127, 32000, 1000000, 1000000, 1.5, 3.14159265358979, 1234.5678, #2026-01-15 08:30:00#, 'hello world', 'memo content here')")
-    $connection.Execute("INSERT INTO typed (id, flag, val_byte, val_short, val_int, val_long, val_single, val_double, val_currency, val_datetime, val_text, val_memo) VALUES (2, FALSE, 255, -32000, -1000000, -1000000, -2.75, -0.001, -99.9900, #1999-12-31 23:59:59#, 'special chars !@#$%%^&*()', 'line1' & Chr(10) & 'line2')")
-    $connection.Execute("INSERT INTO typed (id, flag, val_byte, val_short, val_int, val_long, val_single, val_double, val_currency, val_datetime, val_text, val_memo) VALUES (3, TRUE, 0, 0, 0, 0, 0, 0, 0, #1899-12-30 00:00:00#, '', '')")
-    $connection.Close()
-    exit 0
-  } catch {
-    $lastError = $_.Exception.Message
-    if (Test-Path -LiteralPath $path) {
-      Remove-Item -LiteralPath $path -Force
-    }
-  }
-}
-
-[Console]::Error.WriteLine('No usable Access OLE DB provider found: ' + $lastError)
-exit 42
-`, psSingleQuote(path))
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) && exitErr.ExitCode() == 42 {
-		return fmt.Errorf("%w: %s", errMDBProviderUnavailable, strings.TrimSpace(string(out)))
-	}
-	return fmt.Errorf("create mdb: %w: %s", err, strings.TrimSpace(string(out)))
-}
 
 // createChineseTestMDB creates an MDB with Chinese/multibyte characters using
 // ADODB Recordset AddNew to preserve Unicode strings. The PowerShell script is
 // written to a temp file to avoid Go string escaping issues with Unicode.
-func createChineseTestMDB(path string) error {
-	// Build the PowerShell script with Unicode char codes to avoid encoding issues.
-	script := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-$path = %s
-
-$providers = @(
-  @{ Name = 'Microsoft.ACE.OLEDB.16.0'; Engine = 5 },
-  @{ Name = 'Microsoft.ACE.OLEDB.12.0'; Engine = 5 },
-  @{ Name = 'Microsoft.Jet.OLEDB.4.0'; Engine = 5 }
-)
-
-$lastError = $null
-foreach ($provider in $providers) {
-  try {
-    $catalog = New-Object -ComObject ADOX.Catalog
-    $catalog.Create('Provider=' + $provider.Name + ';Data Source=' + $path + ';Jet OLEDB:Engine Type=' + $provider.Engine)
-
-    $conn = New-Object -ComObject ADODB.Connection
-    $conn.Open('Provider=' + $provider.Name + ';Data Source=' + $path)
-    $conn.Execute('CREATE TABLE chinese (id INTEGER, name TEXT(100), description MEMO, score DOUBLE)')
-
-    $rs = New-Object -ComObject ADODB.Recordset
-    $rs.Open('chinese', $conn, 3, 3, 2)
-
-    $rs.AddNew()
-    $rs.Fields.Item('id').Value = 1
-    $rs.Fields.Item('name').Value = [string]::Concat([char]0x5F20, [char]0x4E09)
-    $rs.Fields.Item('description').Value = [string]::Concat([char]0x8FD9, [char]0x662F, [char]0x4E00, [char]0x4E2A, [char]0x4E2D, [char]0x6587, [char]0x63CF, [char]0x8FF0)
-    $rs.Fields.Item('score').Value = 95.5
-    $rs.Update()
-
-    $rs.AddNew()
-    $rs.Fields.Item('id').Value = 2
-    $rs.Fields.Item('name').Value = [string]::Concat([char]0x674E, [char]0x56DB)
-    $rs.Fields.Item('description').Value = [string]::Concat([char]0x7B2C, [char]0x4E8C, [char]0x6761, [char]0x8BB0, [char]0x5F55, [char]0xFF0C, [char]0x5305, [char]0x542B, [char]0x6807, [char]0x70B9, [char]0x7B26, [char]0x53F7, [char]0xFF01, [char]0x0040, [char]0x0023)
-    $rs.Fields.Item('score').Value = 88.0
-    $rs.Update()
-
-    $rs.AddNew()
-    $rs.Fields.Item('id').Value = 3
-    $rs.Fields.Item('name').Value = [string]::Concat([char]0x738B, [char]0x4E94)
-    $rs.Fields.Item('description').Value = ''
-    $rs.Fields.Item('score').Value = 0
-    $rs.Update()
-
-    $rs.AddNew()
-    $rs.Fields.Item('id').Value = 4
-    $rs.Fields.Item('name').Value = [string]::Concat([char]0x6DF7, [char]0x5408, 'Mixed', [char]0x4E2D, 'English', [char]0x6587)
-    $rs.Fields.Item('description').Value = [string]::Concat([char]0x65E5, [char]0x672C, [char]0x8A9E, [char]0x30C6, [char]0x30B9, [char]0x30C8, ' ', [char]0xD55C, [char]0xAD6D, [char]0xC5B4, ' ', [char]0x0627, [char]0x0644, [char]0x0639, [char]0x0631, [char]0x0628, [char]0x064A, [char]0x0629)
-    $rs.Fields.Item('score').Value = 77.7
-    $rs.Update()
-
-    $rs.Close()
-    $conn.Close()
-    exit 0
-  } catch {
-    $lastError = $_.Exception.Message
-    if (Test-Path -LiteralPath $path) {
-      Remove-Item -LiteralPath $path -Force
-    }
-  }
-}
-
-[Console]::Error.WriteLine('No usable Access OLE DB provider found: ' + $lastError)
-exit 42
-`, psSingleQuote(path))
-
-	// Write script to a temp file to avoid encoding issues with -Command.
-	scriptFile, err := os.CreateTemp("", "mdbtest*.ps1")
-	if err != nil {
-		return fmt.Errorf("create temp script: %w", err)
-	}
-	scriptPath := scriptFile.Name()
-	scriptFile.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM
-	scriptFile.WriteString(script)
-	scriptFile.Close()
-	defer os.Remove(scriptPath)
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) && exitErr.ExitCode() == 42 {
-		return fmt.Errorf("%w: %s", errMDBProviderUnavailable, strings.TrimSpace(string(out)))
-	}
-	return fmt.Errorf("create mdb: %w: %s", err, strings.TrimSpace(string(out)))
-}
-
 
 // createNullTestMDB creates an MDB with nullable and non-nullable columns.
 // Note: Access BIT fields do not support NULL — NULL inserts become FALSE.
-func createNullTestMDB(path string) error {
-	script := fmt.Sprintf(`
-$ErrorActionPreference = 'Stop'
-$path = %s
-$providers = @(
-  @{ Name = 'Microsoft.ACE.OLEDB.16.0'; Engine = 5 },
-  @{ Name = 'Microsoft.ACE.OLEDB.12.0'; Engine = 5 },
-  @{ Name = 'Microsoft.Jet.OLEDB.4.0'; Engine = 5 }
-)
-
-$lastError = $null
-foreach ($provider in $providers) {
-  try {
-    $catalog = New-Object -ComObject ADOX.Catalog
-    $createConnection = 'Provider=' + $provider.Name + ';Data Source=' + $path + ';Jet OLEDB:Engine Type=' + $provider.Engine
-    $catalog.Create($createConnection)
-
-    $connection = New-Object -ComObject ADODB.Connection
-    $connection.Open('Provider=' + $provider.Name + ';Data Source=' + $path)
-    $connection.Execute('CREATE TABLE nulltest (id INTEGER, val_int INTEGER, val_text TEXT(50), val_dt DATETIME, val_double DOUBLE, val_bool BIT)')
-    $connection.Execute("INSERT INTO nulltest (id, val_int, val_text, val_dt, val_double, val_bool) VALUES (1, NULL, NULL, NULL, NULL, FALSE)")
-    $connection.Execute("INSERT INTO nulltest (id, val_int, val_text, val_dt, val_double, val_bool) VALUES (2, 42, 'not null', #2026-06-01#, 99.9, TRUE)")
-    $connection.Close()
-    exit 0
-  } catch {
-    $lastError = $_.Exception.Message
-    if (Test-Path -LiteralPath $path) {
-      Remove-Item -LiteralPath $path -Force
-    }
-  }
-}
-
-[Console]::Error.WriteLine('No usable Access OLE DB provider found: ' + $lastError)
-exit 42
-`, psSingleQuote(path))
-
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) && exitErr.ExitCode() == 42 {
-		return fmt.Errorf("%w: %s", errMDBProviderUnavailable, strings.TrimSpace(string(out)))
-	}
-	return fmt.Errorf("create mdb: %w: %s", err, strings.TrimSpace(string(out)))
-}
 
 func TestColumnTypeExactMatch(t *testing.T) {
-	path := t.TempDir() + "/typed.mdb"
-	if err := createTypedTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -251,18 +59,18 @@ func TestColumnTypeExactMatch(t *testing.T) {
 		scanType reflect.Type
 	}
 	want := []colExpect{
-		{"Long Integer", reflect.TypeOf(int64(0))},    // id LONG → Long Integer
-		{"Boolean", reflect.TypeOf(false)},             // flag BIT → Boolean
-		{"Byte", reflect.TypeOf(int64(0))},             // val_byte BYTE → Byte
-		{"Integer", reflect.TypeOf(int64(0))},          // val_short SHORT → Integer (16-bit)
-		{"Long Integer", reflect.TypeOf(int64(0))},     // val_int INTEGER → Long Integer (32-bit)
-		{"Long Integer", reflect.TypeOf(int64(0))},     // val_long LONG → Long Integer
-		{"Single", reflect.TypeOf(float64(0))},         // val_single SINGLE → Single
-		{"Double", reflect.TypeOf(float64(0))},         // val_double DOUBLE → Double
-		{"Currency", reflect.TypeOf(float64(0))},       // val_currency CURRENCY → Currency
-		{"DateTime", reflect.TypeOf(time.Time{})},      // val_datetime DATETIME → DateTime
-		{"Text", reflect.TypeOf("")},                   // val_text TEXT → Text
-		{"Memo/Hyperlink", reflect.TypeOf("")},         // val_memo MEMO → Memo/Hyperlink
+		{"Long Integer", reflect.TypeOf(int64(0))}, // id LONG → Long Integer
+		{"Boolean", reflect.TypeOf(false)},         // flag BIT → Boolean
+		{"Byte", reflect.TypeOf(int64(0))},         // val_byte BYTE → Byte
+		{"Integer", reflect.TypeOf(int64(0))},      // val_short SHORT → Integer (16-bit)
+		{"Long Integer", reflect.TypeOf(int64(0))}, // val_int INTEGER → Long Integer (32-bit)
+		{"Long Integer", reflect.TypeOf(int64(0))}, // val_long LONG → Long Integer
+		{"Single", reflect.TypeOf(float64(0))},     // val_single SINGLE → Single
+		{"Double", reflect.TypeOf(float64(0))},     // val_double DOUBLE → Double
+		{"Currency", reflect.TypeOf(float64(0))},   // val_currency CURRENCY → Currency
+		{"DateTime", reflect.TypeOf(time.Time{})},  // val_datetime DATETIME → DateTime
+		{"Text", reflect.TypeOf("")},               // val_text TEXT → Text
+		{"Memo/Hyperlink", reflect.TypeOf("")},     // val_memo MEMO → Memo/Hyperlink
 	}
 
 	if len(colTypes) != len(want) {
@@ -282,13 +90,7 @@ func TestColumnTypeExactMatch(t *testing.T) {
 }
 
 func TestTypedValuesExactMatch(t *testing.T) {
-	path := t.TempDir() + "/typed.mdb"
-	if err := createTypedTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -424,8 +226,8 @@ func TestTypedValuesExactMatch(t *testing.T) {
 				if !valDatetime.Equal(wantDT) {
 					t.Errorf("val_datetime = %v, want %v", valDatetime, wantDT)
 				}
-				if valText != "special chars !@#$%^&*()" {
-					t.Errorf("val_text = %q, want %q", valText, "special chars !@#$%^&*()")
+				if valText != `special chars !@#$%%^&*()` {
+					t.Errorf("val_text = %q, want %q", valText, `special chars !@#$%%^&*()`)
 				}
 				// memo contains embedded newline
 				if !strings.Contains(valMemo, "line1") || !strings.Contains(valMemo, "line2") {
@@ -510,13 +312,7 @@ func TestTypedValuesExactMatch(t *testing.T) {
 }
 
 func TestNullValuesAllColumns(t *testing.T) {
-	path := t.TempDir() + "/nulltest.mdb"
-	if err := createNullTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/nulltest.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -627,13 +423,7 @@ func TestNullValuesAllColumns(t *testing.T) {
 }
 
 func TestDatabaseTypeNamesAllTypes(t *testing.T) {
-	path := t.TempDir() + "/typed.mdb"
-	if err := createTypedTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -694,13 +484,7 @@ func TestDatabaseTypeNamesAllTypes(t *testing.T) {
 }
 
 func TestColumnTypeLengthReported(t *testing.T) {
-	path := t.TempDir() + "/typed.mdb"
-	if err := createTypedTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -736,13 +520,7 @@ func TestColumnTypeLengthReported(t *testing.T) {
 }
 
 func TestScanIntoInterfaceSlice(t *testing.T) {
-	path := t.TempDir() + "/typed.mdb"
-	if err := createTypedTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/typed.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -778,13 +556,7 @@ func TestScanIntoInterfaceSlice(t *testing.T) {
 }
 
 func TestChineseCharacters(t *testing.T) {
-	path := t.TempDir() + "/chinese.mdb"
-	if err := createChineseTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/chinese.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
@@ -855,13 +627,7 @@ func TestChineseCharacters(t *testing.T) {
 }
 
 func TestChineseCharacterTypes(t *testing.T) {
-	path := t.TempDir() + "/chinese.mdb"
-	if err := createChineseTestMDB(path); err != nil {
-		if errors.Is(err, errMDBProviderUnavailable) {
-			t.Skip(err)
-		}
-		t.Fatal(err)
-	}
+	path := "testdata/chinese.mdb"
 
 	db, err := sql.Open(DriverName, path)
 	if err != nil {
