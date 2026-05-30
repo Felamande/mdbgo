@@ -3,6 +3,7 @@ package puredb
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 )
 
@@ -196,21 +197,21 @@ func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
 		return "0"
 
 	case TypeByte:
-		return fmt.Sprintf("%d", mdb.pgBuf[field.Start])
+		return strconv.FormatInt(int64(mdb.pgBuf[field.Start]), 10)
 
 	case TypeInt:
-		return fmt.Sprintf("%d", GetInt16(mdb.pgBuf[:], field.Start))
+		return strconv.FormatInt(int64(GetInt16(mdb.pgBuf[:], field.Start)), 10)
 
 	case TypeLongInt, TypeComplex:
-		return fmt.Sprintf("%d", GetInt32(mdb.pgBuf[:], field.Start))
+		return strconv.FormatInt(int64(GetInt32(mdb.pgBuf[:], field.Start)), 10)
 
 	case TypeFloat:
 		f := GetSingle(mdb.pgBuf[:], field.Start)
-		return fmt.Sprintf("%.8g", f)
+		return strconv.FormatFloat(float64(f), 'g', 8, 32)
 
 	case TypeDouble:
 		d := GetDouble(mdb.pgBuf[:], field.Start)
-		return fmt.Sprintf("%.16g", d)
+		return strconv.FormatFloat(d, 'g', 16, 64)
 
 	case TypeText:
 		return UnicodeToUTF8(mdb.pgBuf[field.Start:field.Start+field.Siz], mdb.IsJet4())

@@ -50,7 +50,11 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 	}
 	fixedColsFound := 0
 
-	fields := make([]MdbField, table.NumCols)
+	// Reuse pre-allocated field buffer, or allocate once
+	if cap(table.fieldsBuf) < table.NumCols {
+		table.fieldsBuf = make([]MdbField, table.NumCols)
+	}
+	fields := table.fieldsBuf[:table.NumCols]
 
 	for i := 0; i < table.NumCols; i++ {
 		col := table.Columns[i]

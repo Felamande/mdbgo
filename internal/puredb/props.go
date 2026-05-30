@@ -141,15 +141,15 @@ func valueToString(mdb *MdbHandle, dtype int, buf []byte, start, size int) strin
 		}
 		return "0"
 	case TypeByte:
-		return strconv.Itoa(int(buf[start]))
+		return strconv.FormatInt(int64(buf[start]), 10)
 	case TypeInt:
-		return strconv.Itoa(GetInt16(buf, start))
+		return strconv.FormatInt(int64(GetInt16(buf, start)), 10)
 	case TypeLongInt, TypeComplex:
-		return strconv.Itoa(GetInt32(buf, start))
+		return strconv.FormatInt(int64(GetInt32(buf, start)), 10)
 	case TypeFloat:
-		return fmt.Sprintf("%.8g", GetSingle(buf, start))
+		return strconv.FormatFloat(float64(GetSingle(buf, start)), 'g', 8, 32)
 	case TypeDouble:
-		return fmt.Sprintf("%.16g", GetDouble(buf, start))
+		return strconv.FormatFloat(GetDouble(buf, start), 'g', 16, 64)
 	case TypeText:
 		return UnicodeToUTF8(buf[start:start+size], mdb.IsJet4())
 	case TypeRepID:

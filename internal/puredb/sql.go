@@ -7,6 +7,24 @@ import (
 	"time"
 )
 
+// hasPrefixFold checks if s starts with prefix, case-insensitively (ASCII only).
+// Avoids the allocation of strings.ToUpper for simple prefix checks.
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		cs, cp := s[i], prefix[i]
+		if cs >= 'A' && cs <= 'Z' {
+			cs += 32
+		}
+		if cs != cp {
+			return false
+		}
+	}
+	return true
+}
+
 // SQL holds the state for a parsed SQL query.
 type SQL struct {
 	Mdb *MdbHandle
@@ -70,19 +88,17 @@ func (mdb *MdbHandle) OpenQuery(query string) (*SQL, error) {
 
 	query = strings.TrimSpace(query)
 
-	upper := strings.ToUpper(query)
-
-	if strings.HasPrefix(upper, "LIST TABLES") {
+	// Fast ASCII prefix check — avoids strings.ToUpper allocation
+	if hasPrefixFold(query, "list tables") {
 		if err := mdb.ListTables(sql); err != nil {
 			return nil, err
 		}
-		// Bind the single column
 		mdb.sqlBindAll(sql)
 		return sql, nil
 	}
 
-	if strings.HasPrefix(upper, "DESCRIBE TABLE ") {
-		tableName := strings.TrimSpace(query[len("DESCRIBE TABLE "):])
+	if hasPrefixFold(query, "describe table ") {
+		tableName := strings.TrimSpace(query[len("describe table "):])
 		// Remove quotes/brackets
 		tableName = strings.Trim(tableName, `"'[]`)
 		if err := mdb.DescribeTable(sql, tableName); err != nil {
@@ -112,7 +128,16 @@ func (mdb *MdbHandle) OpenQuery(query string) (*SQL, error) {
 // sqlBindAll binds all result columns so values can be extracted.
 func (mdb *MdbHandle) sqlBindAll(sql *SQL) error {
 	for i := 0; i < sql.NumColumns; i++ {
-		boundValue := make([]byte, mdb.bindSize)
+		sqlCol := sql.Columns[i]
+		// Find matching MdbColumn to compute the right buffer size
+		size := 256
+		for _, col := range sql.CurTable.Columns {
+			if equalFold(col.Name, sqlCol.Name) {
+				size = colBindSize(col)
+				break
+			}
+		}
+		boundValue := make([]byte, size)
 		sql.BoundValues = append(sql.BoundValues, boundValue)
 		if err := mdb.sqlBindColumn(sql, i+1, boundValue); err != nil {
 			return err
@@ -132,7 +157,7 @@ func (mdb *MdbHandle) sqlBindColumn(sql *SQL, colNum int, buf []byte) error {
 	// Find the matching MdbColumn in the current table
 	for _, col := range sql.CurTable.Columns {
 		if equalFold(col.Name, sqlCol.Name) {
-			col.BindPtr = buf
+			col.BindPtr = buf[:colBindSize(col)]
 			return nil
 		}
 	}

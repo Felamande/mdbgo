@@ -55,3 +55,45 @@ func ColDispSize(colType, colSize int) int {
 	}
 	return 0
 }
+
+// colBindSize returns the buffer size needed for binding a column's string value.
+func colBindSize(col *MdbColumn) int {
+	switch col.ColType {
+	case TypeBool:
+		return 2
+	case TypeByte:
+		return 4
+	case TypeInt:
+		return 7
+	case TypeLongInt, TypeComplex:
+		return 12
+	case TypeFloat:
+		return 20
+	case TypeDouble:
+		return 25
+	case TypeDateTime:
+		return 20
+	case TypeMoney:
+		return 30
+	case TypeRepID:
+		return 40
+	case TypeNumeric:
+		return 30
+	case TypeText:
+		n := col.ColSize
+		if n < 64 { n = 64 }
+		if n > 4096 { n = 4096 }
+		return n
+	case TypeMemo:
+		n := col.ColSize
+		if n < 256 { n = 256 }
+		if n > 16384 { n = 16384 }
+		return n
+	case TypeBinary, TypeOLE:
+		n := col.ColSize + MemoOverhead
+		if n < 64 { n = 64 }
+		return n
+	default:
+		return 256
+	}
+}

@@ -46,6 +46,9 @@ type MdbTableDef struct {
 	IsTempTable    bool
 	TempTablePages [][]byte
 
+	// Pre-allocated field buffer for row cracking (reused across rows)
+	fieldsBuf []MdbField
+
 	Props *Properties
 }
 

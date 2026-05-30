@@ -107,7 +107,7 @@ func (mdb *MdbHandle) GetCatalogEntryByName(name string) *CatalogEntry {
 func (mdb *MdbHandle) bindColumnByName(table *MdbTableDef, name string) int {
 	for i, col := range table.Columns {
 		if equalFold(col.Name, name) {
-			col.BindPtr = make([]byte, mdb.bindSize)
+			col.BindPtr = make([]byte, colBindSize(col))
 			return i
 		}
 	}
