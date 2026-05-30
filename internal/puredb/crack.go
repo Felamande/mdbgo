@@ -79,14 +79,18 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 		if col.IsFixed && fixedColsFound < rowFixedCols {
 			colStart := col.FixedOffset + colCountSize
 			f.Start = rowStart + colStart
-			f.Value = mdb.pgBuf[rowStart+colStart:]
 			f.Siz = col.ColSize
+			if f.Siz > 0 && rowStart+colStart+f.Siz <= len(mdb.pgBuf) {
+				f.Value = mdb.pgBuf[rowStart+colStart : rowStart+colStart+f.Siz]
+			}
 			fixedColsFound++
 		} else if !col.IsFixed && col.VarColNum < len(varColOffsets)-1 {
 			colStart := varColOffsets[col.VarColNum]
 			f.Start = rowStart + colStart
-			f.Value = mdb.pgBuf[rowStart+colStart:]
 			f.Siz = varColOffsets[col.VarColNum+1] - colStart
+			if f.Siz > 0 && rowStart+colStart+f.Siz <= len(mdb.pgBuf) {
+				f.Value = mdb.pgBuf[rowStart+colStart : rowStart+colStart+f.Siz]
+			}
 		} else {
 			f.Start = 0
 			f.Value = nil
