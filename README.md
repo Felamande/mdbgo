@@ -2,22 +2,31 @@
 
 A read-only `database/sql` driver for Microsoft Access databases (`.mdb` and `.accdb`) written in Go. **No Microsoft software, ODBC drivers, or OLE DB providers required.**
 
-mdbgo parses Access database files directly by embedding the open-source [mdbtools](https://github.com/mdbtools/mdbtools) C library via cgo. It compiles mdbtools in-tree with zero external Go dependencies.
+mdbgo provides **two drivers** — a pure Go implementation and a CGo-based implementation backed by [mdbtools](https://github.com/mdbtools/mdbtools).
 
-> **Note:** This driver is read-only and feature-limited. It is designed for querying existing Access databases, not modifying them.
+| Driver | Name | Backend | C compiler | Speed | Memory |
+|--------|------|---------|------------|-------|--------|
+| Pure Go | `"gomdb"` | `driver/puredb` | No | Faster | ~45 KB/op |
+| CGo | `"cmdb"` | `driver/cmdb` | `zig cc` | Fast | ~2 KB/op |
+
+Both drivers are feature-equivalent and produce identical results — verified across 32,549 rows over 5 databases with 0 value differences.
+
+> **Note:** Both drivers are read-only — querying existing Access databases only, no writes.
 
 ## Features
 
-- Standard `database/sql` interface (driver name: `"mdb"`)
-- Reads both MDB (Jet) and ACCDB files
+- Standard `database/sql` interface
+- Full [sqlx](https://github.com/jmoiron/sqlx) compatibility (`StructScan`, `Select`, `Get`, `Named` queries)
+- Reads MDB (Jet 3/4) and ACCDB files
 - No dependency on Microsoft Access, ACE/Jet OLE DB, or ODBC
-- SQL queries via mdbtools' built-in Jet SQL engine (`SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `LIST TABLES`, `DESCRIBE`)
+- SQL queries: `SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `LIST TABLES`, `DESCRIBE TABLE`
 - Parameterized queries with `?` placeholders
-- Full type coverage for all 15 Access column types
-- Rich column metadata (`ColumnTypeDatabaseTypeName`, `ColumnTypeLength`, `ColumnTypeNullable`, `ColumnTypeScanType`)
+- All 15 Access column types with `sql.Null*` support
+- Full column metadata (`ColumnTypeDatabaseTypeName`, `ColumnTypeLength`, `ColumnTypeScanType`)
 - Unicode support (CJK, Arabic, etc.)
 - Binary data and OLE object reading
-- DateTime handling (Julian day conversion to `time.Time`)
+- DateTime handling with `time.Time`
+- LIKE pattern matching with Chinese/Unicode text
 
 ## Installation
 
@@ -25,57 +34,56 @@ mdbgo parses Access database files directly by embedding the open-source [mdbtoo
 go get github.com/Felamande/mdbgo
 ```
 
-A C compiler (gcc/clang/MSVC) is required since the project uses cgo. No additional C libraries need to be installed — mdbtools is compiled from the embedded submodule. Better use zig cc.
+### Pure Go driver — `"gomdb"`
+
+No C toolchain needed:
+
+```bash
+CGO_ENABLED=0 go build
+```
+
+### CGo driver — `"cmdb"`
+
+Requires a C compiler. [zig cc](https://ziglang.org) recommended:
+
+```bash
+CC="zig cc" CGO_ENABLED=1 go build
+```
+
+No external C libraries needed — mdbtools is compiled in-tree.
 
 ## Usage
 
 ```go
-package main
-
 import (
     "database/sql"
-    "fmt"
-    "log"
-
-    _ "github.com/Felamande/mdbgo"
+    _ "github.com/Felamande/mdbgo/driver/puredb"  // pure Go
+    // _ "github.com/Felamande/mdbgo/driver/cmdb" // or CGo
 )
 
-func main() {
-    db, err := sql.Open("mdb", "path/to/database.mdb")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
+db, _ := sql.Open("gomdb", "path/to/database.mdb") // or "cmdb"
 
-    rows, err := db.QueryContext(context.Background(),
-        "SELECT ID, Name, Birthday FROM Users WHERE Age > ?", 18)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer rows.Close()
+// Query with parameters
+rows, _ := db.Query("SELECT ID, Name, Birthday FROM Users WHERE Age > ?", 18)
 
-    for rows.Next() {
-        var id int64
-        var name string
-        var birthday time.Time
-        if err := rows.Scan(&id, &name, &birthday); err != nil {
-            log.Fatal(err)
-        }
-        fmt.Printf("%d: %s (%s)\n", id, name, birthday)
-    }
+// sqlx struct scanning
+type User struct {
+    ID       int64     `db:"ID"`
+    Name     string    `db:"Name"`
+    Birthday time.Time `db:"Birthday"`
 }
+var users []User
+sqlxDB.Select(&users, "SELECT * FROM Users")
 ```
 
 ### Listing tables
-
 ```go
-rows, err := db.Query("LIST TABLES")
+rows, _ := db.Query("LIST TABLES")
 ```
 
 ### Describing a table
-
 ```go
-rows, err := db.Query("DESCRIBE MyTable")
+rows, _ := db.Query("DESCRIBE TABLE MyTable")
 ```
 
 ## Type Mapping
@@ -101,44 +109,53 @@ rows, err := db.Query("DESCRIBE MyTable")
 ## Limitations
 
 - **Read-only** — no INSERT, UPDATE, DELETE, or DDL operations
-- **No transactions** — `Begin()` is not supported
-- **No connection pooling** — each query opens a fresh mdbtools handle
-- **Client-side parameter interpolation** — `?` placeholders are escaped and interpolated into the SQL string before execution (safe, but not true server-side prepared statements)
+- **No transactions** — `Begin()` not supported
+- **Client-side parameter interpolation** — `?` placeholders are escaped and interpolated into the SQL string
 - **BIT/Boolean NULL** — Access BIT fields cannot store NULL; NULL coerces to FALSE
-- **TEXT length** — Unicode TEXT(n) columns report byte length (2*n), not character count
-- **cgo required** — a C toolchain is needed to build; cross-compilation is more involved
-- **Jet SQL only** — advanced ACCDB-specific SQL features may not be supported
+- **TEXT length** — Unicode TEXT(n) columns report byte length (2×n)
+- **No `IN (...)` syntax** — use multiple `OR` conditions instead
+- **Jet SQL only** — advanced ACCDB SQL features may not be supported
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────┐
-│  Go application (database/sql)      │
-├─────────────────────────────────────┤
-│  driver.go  (mdbtool package)       │  ← sql/driver interfaces
-├─────────────────────────────────────┤
-│  internal/cmdb/cmdb.go              │  ← cgo bridge (Go side)
-├─────────────────────────────────────┤
-│  internal/cmdb/bridge.c             │  ← cgo bridge (C side, 148 lines)
-├─────────────────────────────────────┤
-│  mdbtools (embedded C library)      │  ← libmdb + libmdbsql + parser/lexer
-│  + fakeglib (GLib replacement)      │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Go application / sqlx                       │
+├──────────────────────────────────────────────┤
+│  driver/puredb/puredb.go    driver/cmdb/cmdb.go
+│  (pure Go, zero CGo)        (CGo + mdbtools) │
+├──────────────────────────────────────────────┤
+│  internal/puredb/           internal/cmdb/   │
+│  19 .go files               C source + cgo   │
+└──────────────────────────────────────────────┘
 ```
 
-mdbtools source is included as a git submodule and compiled in-tree via stub `.c` files that `#include` the real sources. The Bison parser and Flex lexer output are pre-generated, so no code generation tools are needed at build time.
+Both backends parse Access database files directly — the pure Go driver is a ground-up port of mdbtools with no C dependencies, while the CGo driver wraps the original C library.
+
+## Project layout
+
+```
+mdbgo/
+├── driver/
+│   ├── cmdb/                 # CGo driver — registers "cmdb"
+│   │   └── cmdb.go
+│   └── puredb/               # Pure Go driver — registers "gomdb"
+│       └── puredb.go
+├── internal/
+│   ├── cmdb/                 # CGo backend (bridge + mdbtools C source)
+│   └── puredb/               # Pure Go backend (MDB parser, SQL engine)
+├── testdata/                 # .mdb test databases
+└── temp/                     # Comparison harnesses
+```
 
 ## Requirements
 
 - Go 1.26+
-- C compiler (gcc, clang, or MSVC)
-- Git (for submodule checkout)
+- CGo driver: C compiler (gcc, clang, or `zig cc`)
+- Pure Go driver: no additional requirements
 
 ## License
 
-The Go code in this repository is licensed under the [MIT License](LICENSE).
+Go code: [MIT License](LICENSE)
 
-This project embeds [mdbtools](https://github.com/mdbtools/mdbtools), which
-is licensed under the
-[GNU Library General Public License v2 or later](THIRDPARTY-LICENSES.md).
-See `internal/mdbtools/COPYING.LIB` for the full LGPL text.
+This project embeds [mdbtools](https://github.com/mdbtools/mdbtools) under the [LGPL-2.0-or-later](THIRDPARTY-LICENSES.md). See `internal/cmdb/mdbtools/COPYING.LIB`.
