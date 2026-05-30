@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	backend "github.com/Felamande/mdbgo/internal/puredb"
+	backend "github.com/Felamande/mdbgo/internal/gomdb"
 )
 
 func TestDriverOpenAndUnsupportedOperations(t *testing.T) {

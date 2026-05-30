@@ -6,7 +6,7 @@ mdbgo provides **two drivers** — a pure Go implementation and a CGo-based impl
 
 | Driver | Name | Backend | C compiler | Speed | Memory |
 |--------|------|---------|------------|-------|--------|
-| Pure Go | `"gomdb"` | `driver/puredb` | No | Faster | ~45 KB/op |
+| Pure Go | `"gomdb"` | `driver/gomdb` | No | Faster | ~45 KB/op |
 | CGo | `"cmdb"` | `driver/cmdb` | `zig cc` | Fast | ~2 KB/op |
 
 Both drivers are feature-equivalent and produce identical results — verified across 32,549 rows over 5 databases with 0 value differences.
@@ -57,7 +57,7 @@ No external C libraries needed — mdbtools is compiled in-tree.
 ```go
 import (
     "database/sql"
-    _ "github.com/Felamande/mdbgo/driver/puredb"  // pure Go
+    _ "github.com/Felamande/mdbgo/driver/gomdb"  // pure Go
     // _ "github.com/Felamande/mdbgo/driver/cmdb" // or CGo
 )
 
@@ -122,10 +122,10 @@ rows, _ := db.Query("DESCRIBE TABLE MyTable")
 ┌──────────────────────────────────────────────┐
 │  Go application / sqlx                       │
 ├──────────────────────────────────────────────┤
-│  driver/puredb/puredb.go    driver/cmdb/cmdb.go
+│  driver/gomdb/gomdb.go    driver/cmdb/cmdb.go
 │  (pure Go, zero CGo)        (CGo + mdbtools) │
 ├──────────────────────────────────────────────┤
-│  internal/puredb/           internal/cmdb/   │
+│  internal/gomdb/           internal/cmdb/   │
 │  19 .go files               C source + cgo   │
 └──────────────────────────────────────────────┘
 ```
@@ -139,11 +139,11 @@ mdbgo/
 ├── driver/
 │   ├── cmdb/                 # CGo driver — registers "cmdb"
 │   │   └── cmdb.go
-│   └── puredb/               # Pure Go driver — registers "gomdb"
-│       └── puredb.go
+│   └── gomdb/               # Pure Go driver — registers "gomdb"
+│       └── gomdb.go
 ├── internal/
 │   ├── cmdb/                 # CGo backend (bridge + mdbtools C source)
-│   └── puredb/               # Pure Go backend (MDB parser, SQL engine)
+│   └── gomdb/               # Pure Go backend (MDB parser, SQL engine)
 ├── testdata/                 # .mdb test databases
 └── temp/                     # Comparison harnesses
 ```

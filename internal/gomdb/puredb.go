@@ -1,8 +1,8 @@
-// Package puredb is a pure Go implementation of an MDB (Microsoft Access) file reader.
+// Package gomdb is a pure Go implementation of an MDB (Microsoft Access) file reader.
 // It provides the same capabilities as the C-based cmdb driver but without CGo dependencies.
 //
 // The public API mirrors cmdb.Query for easy driver integration.
-package puredb
+package gomdb
 
 import (
 	"strconv"
@@ -123,7 +123,7 @@ func ParseFloat(s string) (float64, bool) {
 	return v, err == nil
 }
 
-// Error implements the error interface for puredb errors.
+// Error implements the error interface for gomdb errors.
 type Error struct {
 	Msg string
 }

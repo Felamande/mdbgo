@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"errors"
@@ -17,7 +17,7 @@ func (mdb *MdbHandle) ReadNextDpg(table *MdbTableDef) error {
 	nextPg := mapFindNext(mdb, table.UsageMap, table.MapSz, int(table.CurPhysPg))
 	if nextPg > 0 && nextPg != int(table.CurPhysPg) {
 		if err := mdb.readPage(uint32(nextPg)); err != nil {
-			return fmt.Errorf("puredb: error reading page %d: %w", nextPg, err)
+			return fmt.Errorf("gomdb: error reading page %d: %w", nextPg, err)
 		}
 		table.CurPhysPg = uint32(nextPg)
 		if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {

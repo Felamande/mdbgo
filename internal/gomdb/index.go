@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import "fmt"
 
@@ -25,7 +25,7 @@ func (mdb *MdbHandle) ReadIndices(table *MdbTableDef) error {
 	numIdxsNotType2 := 0
 	for i := 0; i < table.NumIdxs; i++ {
 		if n := mdb.ReadPgIfN(idxBuf, idx2Sz); n < idx2Sz {
-			return fmt.Errorf("puredb: unable to read index %d definition", i)
+			return fmt.Errorf("gomdb: unable to read index %d definition", i)
 		}
 		idx := &MdbIndex{
 			Table:     table,
@@ -52,7 +52,7 @@ func (mdb *MdbHandle) ReadIndices(table *MdbTableDef) error {
 		}
 		tmpBuf := make([]byte, nameSz)
 		if n := mdb.ReadPgIfN(tmpBuf, nameSz); n < nameSz {
-			return fmt.Errorf("puredb: unable to read index %d name", i)
+			return fmt.Errorf("gomdb: unable to read index %d name", i)
 		}
 		idx.Name = UnicodeToUTF8(tmpBuf, mdb.IsJet4())
 	}

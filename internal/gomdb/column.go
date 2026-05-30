@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 // MdbColumn represents a column in an Access table.
 type MdbColumn struct {

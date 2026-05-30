@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import "fmt"
 
@@ -283,12 +283,12 @@ func (mdb *MdbHandle) ListTables(sql *SQL) error {
 func (mdb *MdbHandle) DescribeTable(sql *SQL, tableName string) error {
 	table, err := mdb.ReadTableByName(tableName, ObjTable)
 	if err != nil {
-		return fmt.Errorf("puredb: describe table: %w", err)
+		return fmt.Errorf("gomdb: describe table: %w", err)
 	}
 	defer mdb.FreeTableDef(table)
 
 	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("puredb: describe table columns: %w", err)
+		return fmt.Errorf("gomdb: describe table columns: %w", err)
 	}
 
 	ttable := mdb.CreateTempTable("#describe")

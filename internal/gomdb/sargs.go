@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 // SargNode is a node in the search argument tree (WHERE clause).
 type SargNode struct {

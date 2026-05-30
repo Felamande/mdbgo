@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 // ColFixedSize returns the fixed byte size for a column type, or -1 if variable.
 func ColFixedSize(colType int) int {

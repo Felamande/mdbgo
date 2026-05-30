@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 const (
 	maxMoneyPrecision   = 20

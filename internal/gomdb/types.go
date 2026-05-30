@@ -1,6 +1,6 @@
-// Package puredb is a pure Go implementation of an MDB (Microsoft Access) file reader.
+// Package gomdb is a pure Go implementation of an MDB (Microsoft Access) file reader.
 // It provides the same capabilities as the C-based mdbtools but without CGo dependencies.
-package puredb
+package gomdb
 
 // Page types
 const (

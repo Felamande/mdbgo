@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 // rc4Key holds the state for an RC4 cipher.
 type rc4Key struct {

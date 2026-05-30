@@ -1,6 +1,6 @@
-// Package puredb provides a pure Go database/sql driver for Microsoft Access (.mdb) files.
+// Package gomdb provides a pure Go database/sql driver for Microsoft Access (.mdb) files.
 // It registers under the name "mdb" and requires no CGo or external C libraries.
-package puredb
+package gomdb
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	backend "github.com/Felamande/mdbgo/internal/puredb"
+	backend "github.com/Felamande/mdbgo/internal/gomdb"
 )
 
 const DriverName = "gomdb"

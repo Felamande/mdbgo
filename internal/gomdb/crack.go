@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import "fmt"
 
@@ -19,7 +19,7 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 
 	bitmaskSz := (rowCols + 7) / 8
 	if bitmaskSz >= rowEnd-rowStart {
-		return nil, fmt.Errorf("puredb: invalid page buffer in crack_row")
+		return nil, fmt.Errorf("gomdb: invalid page buffer in crack_row")
 	}
 
 	// Null mask is at the end of the row

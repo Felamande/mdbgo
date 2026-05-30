@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"encoding/binary"
@@ -59,7 +59,7 @@ type Properties struct {
 func OpenMDB(filename string) (*MdbHandle, error) {
 	f, err := os.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("puredb: unable to open file %s: %w", filename, err)
+		return nil, fmt.Errorf("gomdb: unable to open file %s: %w", filename, err)
 	}
 	return openMDBFromReader(f)
 }
@@ -79,7 +79,7 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 
 	size, err := readerSize(r)
 	if err != nil {
-		return nil, fmt.Errorf("puredb: unable to determine file size: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to determine file size: %w", err)
 	}
 
 	mdb.f = &MdbFile{
@@ -89,12 +89,12 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 
 	// Read page 0 (database definition page)
 	if err := mdb.readPage(0); err != nil {
-		return nil, fmt.Errorf("puredb: unable to read page 0: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to read page 0: %w", err)
 	}
 
 	// Verify it's an MDB file
 	if mdb.pgBuf[0] != 0 {
-		return nil, fmt.Errorf("puredb: not a valid MDB file (page 0 type = %d)", mdb.pgBuf[0])
+		return nil, fmt.Errorf("gomdb: not a valid MDB file (page 0 type = %d)", mdb.pgBuf[0])
 	}
 
 	// Detect Jet version
@@ -105,7 +105,7 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 	case Jet4, Accdb2007, Accdb2010, Accdb2013, Accdb2016, Accdb2019:
 		mdb.fmt = &Jet4FormatConstants
 	default:
-		return nil, fmt.Errorf("puredb: unknown Jet version: 0x%02x", mdb.f.jetVersion)
+		return nil, fmt.Errorf("gomdb: unknown Jet version: 0x%02x", mdb.f.jetVersion)
 	}
 
 	// Decrypt database definition section
@@ -156,13 +156,13 @@ func (mdb *MdbHandle) readPage(pg uint32) error {
 
 	offset := int64(pg) * int64(mdb.fmt.PgSize)
 	if offset >= mdb.f.size {
-		return fmt.Errorf("puredb: page %d is beyond EOF (offset %d, size %d)", pg, offset, mdb.f.size)
+		return fmt.Errorf("gomdb: page %d is beyond EOF (offset %d, size %d)", pg, offset, mdb.f.size)
 	}
 
 	buf := mdb.pgBuf[:mdb.fmt.PgSize]
 	n, err := mdb.f.stream.ReadAt(buf, offset)
 	if err != nil && err != io.EOF {
-		return fmt.Errorf("puredb: error reading page %d: %w", pg, err)
+		return fmt.Errorf("gomdb: error reading page %d: %w", pg, err)
 	}
 
 	// Zero-fill partial reads
@@ -191,13 +191,13 @@ func (mdb *MdbHandle) readPage(pg uint32) error {
 func (mdb *MdbHandle) readAltPage(pg uint32) error {
 	offset := int64(pg) * int64(mdb.fmt.PgSize)
 	if offset >= mdb.f.size {
-		return fmt.Errorf("puredb: page %d is beyond EOF", pg)
+		return fmt.Errorf("gomdb: page %d is beyond EOF", pg)
 	}
 
 	buf := mdb.altPgBuf[:mdb.fmt.PgSize]
 	n, err := mdb.f.stream.ReadAt(buf, offset)
 	if err != nil && err != io.EOF {
-		return fmt.Errorf("puredb: error reading alt page %d: %w", pg, err)
+		return fmt.Errorf("gomdb: error reading alt page %d: %w", pg, err)
 	}
 	for i := n; i < mdb.fmt.PgSize; i++ {
 		buf[i] = 0
@@ -235,7 +235,7 @@ func readerSize(r io.ReaderAt) (int64, error) {
 	if s, ok := r.(interface{ Size() int64 }); ok {
 		return s.Size(), nil
 	}
-	return 0, fmt.Errorf("puredb: cannot determine size of reader")
+	return 0, fmt.Errorf("gomdb: cannot determine size of reader")
 }
 
 // --- Byte/Integer/Float extraction from buffers ---
@@ -395,7 +395,7 @@ func (mdb *MdbHandle) findRow(row int) (start int, length int, err error) {
 	rco := mdb.fmt.RowCountOffset
 
 	if row > 1000 {
-		return 0, 0, fmt.Errorf("puredb: row %d exceeds maximum", row)
+		return 0, 0, fmt.Errorf("gomdb: row %d exceeds maximum", row)
 	}
 
 	start = GetInt16(mdb.pgBuf[:], rco+2+row*2)
@@ -407,7 +407,7 @@ func (mdb *MdbHandle) findRow(row int) (start int, length int, err error) {
 
 	startOff := start & OffsetMask
 	if startOff >= mdb.fmt.PgSize || startOff > nextStart || nextStart > mdb.fmt.PgSize {
-		return 0, 0, fmt.Errorf("puredb: invalid row position")
+		return 0, 0, fmt.Errorf("gomdb: invalid row position")
 	}
 
 	return start, length, nil

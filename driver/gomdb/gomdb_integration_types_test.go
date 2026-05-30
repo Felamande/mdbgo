@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	backend "github.com/Felamande/mdbgo/internal/puredb"
+	backend "github.com/Felamande/mdbgo/internal/gomdb"
 )
 
 // createTypedTestMDB creates an MDB with a table covering all Access column types.

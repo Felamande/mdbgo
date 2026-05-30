@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"fmt"
@@ -114,7 +114,7 @@ func (mdb *MdbHandle) OpenQuery(query string) (*SQL, error) {
 	}
 
 	if sql.CurTable == nil {
-		return nil, fmt.Errorf("puredb: no result table for query")
+		return nil, fmt.Errorf("gomdb: no result table for query")
 	}
 
 	// Bind columns for value extraction
@@ -149,7 +149,7 @@ func (mdb *MdbHandle) sqlBindAll(sql *SQL) error {
 // sqlBindColumn binds a single result column by its ordinal (1-based).
 func (mdb *MdbHandle) sqlBindColumn(sql *SQL, colNum int, buf []byte) error {
 	if colNum <= 0 || colNum > sql.NumColumns {
-		return fmt.Errorf("puredb: column %d out of range", colNum)
+		return fmt.Errorf("gomdb: column %d out of range", colNum)
 	}
 
 	sqlCol := sql.Columns[colNum-1]
@@ -162,7 +162,7 @@ func (mdb *MdbHandle) sqlBindColumn(sql *SQL, colNum int, buf []byte) error {
 		}
 	}
 
-	return fmt.Errorf("puredb: column %q not found in table", sqlCol.Name)
+	return fmt.Errorf("gomdb: column %q not found in table", sqlCol.Name)
 }
 
 // --- Tokenizer ---
@@ -361,7 +361,7 @@ func (p *parser) next() token {
 func (p *parser) expect(typ tokenType) (token, error) {
 	tok := p.next()
 	if tok.typ != typ {
-		return tok, fmt.Errorf("puredb: expected token type %d, got %v", typ, tok)
+		return tok, fmt.Errorf("gomdb: expected token type %d, got %v", typ, tok)
 	}
 	return tok, nil
 }
@@ -376,7 +376,7 @@ func (p *parser) parse() error {
 	tok := p.next()
 
 	if tok.typ != tokIdent {
-		return fmt.Errorf("puredb: expected SELECT, got %v", tok)
+		return fmt.Errorf("gomdb: expected SELECT, got %v", tok)
 	}
 
 	upper := strings.ToUpper(tok.value)
@@ -385,7 +385,7 @@ func (p *parser) parse() error {
 	case "SELECT":
 		return p.parseSelectStmt()
 	default:
-		return fmt.Errorf("puredb: unexpected keyword %q", tok.value)
+		return fmt.Errorf("gomdb: unexpected keyword %q", tok.value)
 	}
 }
 
@@ -398,7 +398,7 @@ func (p *parser) parseSelectStmt() error {
 	// Expect FROM
 	fromTok := p.next()
 	if strings.ToUpper(fromTok.value) != "FROM" {
-		return fmt.Errorf("puredb: expected FROM, got %q", fromTok.value)
+		return fmt.Errorf("gomdb: expected FROM, got %q", fromTok.value)
 	}
 
 	// Parse table name
@@ -485,7 +485,7 @@ func (p *parser) parseSelectList() error {
 func (p *parser) parseTableList() error {
 	tok := p.next()
 	if tok.typ != tokIdent {
-		return fmt.Errorf("puredb: expected table name, got %v", tok)
+		return fmt.Errorf("gomdb: expected table name, got %v", tok)
 	}
 	p.sql.AddTable(tok.value)
 	return nil
@@ -593,7 +593,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 	// Must be an identifier (column name)
 	if tok.typ != tokIdent {
 		// This could be a literal comparison or something unexpected
-		return nil, fmt.Errorf("puredb: expected column name, got %v", tok.value)
+		return nil, fmt.Errorf("gomdb: expected column name, got %v", tok.value)
 	}
 
 	colName := tok.value
@@ -623,7 +623,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}
 		nullTok := p.next()
 		if strings.ToUpper(nullTok.value) != "NULL" {
-			return nil, fmt.Errorf("puredb: expected NULL after IS, got %q", nullTok.value)
+			return nil, fmt.Errorf("gomdb: expected NULL after IS, got %q", nullTok.value)
 		}
 
 		op := OpIsNull
@@ -663,7 +663,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 				value = MdbAny{D: td}
 				valType = TypeDouble
 			} else {
-				return nil, fmt.Errorf("puredb: strptime parse error: %w", err)
+				return nil, fmt.Errorf("gomdb: strptime parse error: %w", err)
 			}
 		} else {
 			// Just skip the parenthesized content
@@ -709,7 +709,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 	}
 	op, known := opMap[opUpper]
 	if !known {
-		return nil, fmt.Errorf("puredb: unexpected token %q after column", nextTok.value)
+		return nil, fmt.Errorf("gomdb: unexpected token %q after column", nextTok.value)
 	}
 	p.next() // Consume operator
 
@@ -760,7 +760,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}
 
 	default:
-		return nil, fmt.Errorf("puredb: expected value after operator, got %v", valTok)
+		return nil, fmt.Errorf("gomdb: expected value after operator, got %v", valTok)
 	}
 
 	return &SargNode{
@@ -792,7 +792,7 @@ func (p *parser) parseLimit() error {
 	tok := p.next()
 	limit, err := strconv.Atoi(tok.value)
 	if err != nil {
-		return fmt.Errorf("puredb: invalid LIMIT value: %q", tok.value)
+		return fmt.Errorf("gomdb: invalid LIMIT value: %q", tok.value)
 	}
 	p.sql.Limit = limit
 	return nil
@@ -816,16 +816,16 @@ func (sql *SQL) mdbExecute() error {
 
 	// Read catalog and find the table
 	if err := mdb.ReadCatalog(ObjTable); err != nil {
-		return fmt.Errorf("puredb: %w", err)
+		return fmt.Errorf("gomdb: %w", err)
 	}
 
 	table, err := mdb.ReadTableByName(tableName, ObjTable)
 	if err != nil {
-		return fmt.Errorf("puredb: %w", err)
+		return fmt.Errorf("gomdb: %w", err)
 	}
 
 	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("puredb: %w", err)
+		return fmt.Errorf("gomdb: %w", err)
 	}
 
 	// Handle COUNT(*) without WHERE
@@ -928,10 +928,10 @@ func (sql *SQL) AddTable(name string) {
 // FetchRow fetches the next row from the current table.
 func (sql *SQL) FetchRow() (bool, error) {
 	if sql.Mdb == nil {
-		return false, fmt.Errorf("puredb: no database connection")
+		return false, fmt.Errorf("gomdb: no database connection")
 	}
 	if sql.CurTable == nil {
-		return false, fmt.Errorf("puredb: no current table")
+		return false, fmt.Errorf("gomdb: no current table")
 	}
 
 	hasRow, err := sql.Mdb.FetchRow(sql.CurTable)

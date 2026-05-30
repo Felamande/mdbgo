@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import (
 	"fmt"
@@ -23,12 +23,12 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 
 	table, err := mdb.ReadTable(dummyEntry)
 	if err != nil {
-		return fmt.Errorf("puredb: unable to read MSysObjects table: %w", err)
+		return fmt.Errorf("gomdb: unable to read MSysObjects table: %w", err)
 	}
 	defer mdb.FreeTableDef(table)
 
 	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("puredb: unable to read MSysObjects columns: %w", err)
+		return fmt.Errorf("gomdb: unable to read MSysObjects columns: %w", err)
 	}
 
 	// Bind columns: Id, Name, Type, Flags, LvProp
@@ -39,7 +39,7 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 	lvPropIdx := mdb.bindColumnByName(table, "LvProp")
 
 	if idIdx < 0 || nameIdx < 0 || typeIdx < 0 || flagsIdx < 0 || lvPropIdx < 0 {
-		return fmt.Errorf("puredb: unable to bind all required MSysObjects columns")
+		return fmt.Errorf("gomdb: unable to bind all required MSysObjects columns")
 	}
 
 	lvPropCol := table.Columns[lvPropIdx]
@@ -50,7 +50,7 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 	for {
 		hasRow, err := mdb.FetchRow(table)
 		if err != nil {
-			return fmt.Errorf("puredb: error reading MSysObjects: %w", err)
+			return fmt.Errorf("gomdb: error reading MSysObjects: %w", err)
 		}
 		if !hasRow {
 			break

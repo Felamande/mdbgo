@@ -1,4 +1,4 @@
-package puredb
+package gomdb
 
 import "fmt"
 
@@ -101,10 +101,10 @@ func (mdb *MdbHandle) ReadTable(entry *CatalogEntry) (*MdbTableDef, error) {
 	mfmt := mdb.fmt
 
 	if err := mdb.readPage(entry.TablePg); err != nil {
-		return nil, fmt.Errorf("puredb: unable to read table page %d: %w", entry.TablePg, err)
+		return nil, fmt.Errorf("gomdb: unable to read table page %d: %w", entry.TablePg, err)
 	}
 	if mdb.pgBuf[0] != 0x02 {
-		return nil, fmt.Errorf("puredb: page %d is not a valid table definition page (type=%02x)", entry.TablePg, mdb.pgBuf[0])
+		return nil, fmt.Errorf("gomdb: page %d is not a valid table definition page (type=%02x)", entry.TablePg, mdb.pgBuf[0])
 	}
 
 	table := &MdbTableDef{
@@ -122,10 +122,10 @@ func (mdb *MdbHandle) ReadTable(entry *CatalogEntry) (*MdbTableDef, error) {
 	pgRow := GetInt32(mdb.pgBuf[:], mfmt.TabUsageMapOffset)
 	buf, rowStart, mapSz, err := mdb.findPgRow(pgRow)
 	if err != nil {
-		return nil, fmt.Errorf("puredb: unable to find usage map: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to find usage map: %w", err)
 	}
 	if mapSz < 1 {
-		return nil, fmt.Errorf("puredb: invalid usage map size: %d", mapSz)
+		return nil, fmt.Errorf("gomdb: invalid usage map size: %d", mapSz)
 	}
 	table.MapSz = mapSz
 	table.UsageMap = make([]byte, mapSz)
@@ -135,7 +135,7 @@ func (mdb *MdbHandle) ReadTable(entry *CatalogEntry) (*MdbTableDef, error) {
 	pgRow = GetInt32(mdb.pgBuf[:], mfmt.TabFreeMapOffset)
 	buf, rowStart, freemapSz, err := mdb.findPgRow(pgRow)
 	if err != nil {
-		return nil, fmt.Errorf("puredb: unable to find free map: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to find free map: %w", err)
 	}
 	table.FreemapSz = freemapSz
 	table.FreeUsageMap = make([]byte, freemapSz)
@@ -168,7 +168,7 @@ func (mdb *MdbHandle) ReadTableByName(name string, objType int) (*MdbTableDef, e
 		}
 	}
 
-	return nil, fmt.Errorf("puredb: table %q not found", name)
+	return nil, fmt.Errorf("gomdb: table %q not found", name)
 }
 
 // ReadColumns reads the column definitions for a table.
@@ -184,7 +184,7 @@ func (mdb *MdbHandle) ReadColumns(table *MdbTableDef) error {
 	colBuf := make([]byte, mfmt.TabColEntrySize)
 	for i := 0; i < table.NumCols; i++ {
 		if n := mdb.ReadPgIfN(colBuf, mfmt.TabColEntrySize); n < mfmt.TabColEntrySize {
-			return fmt.Errorf("puredb: unable to read column %d attributes", i)
+			return fmt.Errorf("gomdb: unable to read column %d attributes", i)
 		}
 
 		col := &MdbColumn{
@@ -226,7 +226,7 @@ func (mdb *MdbHandle) ReadColumns(table *MdbTableDef) error {
 		}
 		tmpBuf := make([]byte, nameSz)
 		if n := mdb.ReadPgIfN(tmpBuf, nameSz); n < nameSz {
-			return fmt.Errorf("puredb: unable to read column %d name", i)
+			return fmt.Errorf("gomdb: unable to read column %d name", i)
 		}
 		col.Name = UnicodeToUTF8(tmpBuf, mdb.IsJet4())
 	}
