@@ -1,6 +1,12 @@
 package puredb
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// errNoMorePages is a sentinel returned when no data pages exist for a table.
+var errNoMorePages = errors.New("no more data pages")
 
 // ReadNextDpg reads the next data page for a table into the page buffer.
 // Returns the physical page number, or 0 if no more pages.
@@ -23,7 +29,7 @@ func (mdb *MdbHandle) ReadNextDpg(table *MdbTableDef) error {
 	for {
 		table.CurPhysPg++
 		if err := mdb.readPage(table.CurPhysPg); err != nil {
-			return fmt.Errorf("puredb: no more data pages (EOF)")
+			return errNoMorePages
 		}
 		if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {
 			return nil

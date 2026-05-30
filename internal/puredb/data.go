@@ -49,6 +49,9 @@ func (mdb *MdbHandle) FetchRow(table *MdbTableDef) (bool, error) {
 		table.CurRow = 0
 		if !table.IsTempTable && table.Strategy != IndexScan {
 			if err := mdb.ReadNextDpg(table); err != nil {
+				if err == errNoMorePages {
+					return false, nil // empty table — no data pages
+				}
 				return false, err
 			}
 		}
