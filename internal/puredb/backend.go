@@ -85,10 +85,9 @@ func colBindSize(col *MdbColumn) int {
 		if n > 8192 { n = 8192 }
 		return n
 	case TypeMemo:
-		n := col.ColSize
-		if n < 4096 { n = 4096 }
-		if n > 65536 { n = 65536 }
-		return n
+		// Match cmdb's MDB_BIND_SIZE=16384 for large memo fields.
+		// ColSize is 0 for memos, so use a generous default.
+		return 16384
 	case TypeBinary, TypeOLE:
 		n := col.ColSize + MemoOverhead
 		if n < 64 { n = 64 }

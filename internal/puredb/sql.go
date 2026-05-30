@@ -993,17 +993,35 @@ func (sql *SQL) ColumnInfo() []Column {
 
 // Value returns the bound string value for a column.
 func (sql *SQL) Value(idx int) string {
-	if idx < 0 || idx >= len(sql.BoundValues) {
+	if idx < 0 || idx >= sql.NumColumns {
 		return ""
 	}
-	val := sql.BoundValues[idx]
-	// Strip trailing null bytes
-	for i, b := range val {
-		if b == 0 {
-			return string(val[:i])
+	// Read from the column's current BindPtr (which may have grown for large values)
+	sqlCol := sql.Columns[idx]
+	if sql.CurTable != nil {
+		for _, col := range sql.CurTable.Columns {
+			if equalFold(col.Name, sqlCol.Name) && col.BindPtr != nil {
+				val := col.BindPtr
+				for i, b := range val {
+					if b == 0 {
+						return string(val[:i])
+					}
+				}
+				return string(val)
+			}
 		}
 	}
-	return string(val)
+	// Fallback to stored bound values
+	if idx < len(sql.BoundValues) {
+		val := sql.BoundValues[idx]
+		for i, b := range val {
+			if b == 0 {
+				return string(val[:i])
+			}
+		}
+		return string(val)
+	}
+	return ""
 }
 
 // IsNull checks if a column value is NULL.

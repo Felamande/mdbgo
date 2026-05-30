@@ -175,6 +175,9 @@ func (mdb *MdbHandle) attemptBind(col *MdbColumn, field *MdbField) {
 		col.CurValueLen = field.Siz
 		if col.BindPtr != nil {
 			str := mdb.colToString(col, field)
+			if len(str) >= len(col.BindPtr) {
+				col.BindPtr = append(col.BindPtr, make([]byte, len(str)-len(col.BindPtr)+1)...)
+			}
 			copy(col.BindPtr[:], str)
 			if len(str) < len(col.BindPtr) {
 				col.BindPtr[len(str)] = 0
