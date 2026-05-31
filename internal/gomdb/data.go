@@ -72,6 +72,7 @@ func (mdb *MdbHandle) FetchRow(table *MdbTableDef) (bool, error) {
 				}
 			}
 			copy(mdb.pgBuf[:], pages[table.CurPgNum-1])
+			mdb.curPg = 0 // invalidate: pgBuf no longer contains a real disk page
 		} else {
 			rows := GetInt16(mdb.pgBuf[:], mfmt.RowCountOffset)
 
@@ -322,7 +323,7 @@ func DateToTime(td float64) time.Time {
 
 	mday := int(day - int64(cal[mon]) + 1)
 
-	return time.Date(int(yr), time.Month(mon+1), mday, int(hour), int(min), int(sec), 0, time.UTC)
+	return time.Date(int(yr), time.Month(mon+1), mday, int(hour), int(min), int(sec), 0, time.Local)
 }
 
 // memoToString converts a memo field to a string.

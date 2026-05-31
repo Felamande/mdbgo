@@ -37,6 +37,7 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 
 type Conn struct {
 	path string
+	mdb  *backend.MdbHandle
 }
 
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
@@ -46,7 +47,14 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	return &Stmt{conn: c, query: query}, nil
 }
 
-func (c *Conn) Close() error  { return nil }
+func (c *Conn) Close() error {
+	if c.mdb != nil {
+		c.mdb.Close()
+		c.mdb = nil
+	}
+	return nil
+}
+
 func (c *Conn) Begin() (driver.Tx, error) {
 	return nil, errors.New("mdb: transactions are not supported")
 }
@@ -59,7 +67,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if err != nil {
 		return nil, err
 	}
-	h, err := backend.OpenQuery(c.path, expanded)
+	h, err := c.openQuery(expanded)
 	if err != nil {
 		return nil, err
 	}
@@ -79,11 +87,23 @@ func (c *Conn) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	h, err := backend.OpenQuery(c.path, "LIST TABLES")
+	h, err := c.openQuery("LIST TABLES")
 	if err != nil {
 		return err
 	}
 	return h.Close()
+}
+
+// openQuery lazily opens the MDB file (if not already open) and executes a query.
+func (c *Conn) openQuery(query string) (*backend.Query, error) {
+	if c.mdb == nil {
+		mdb, err := backend.OpenMDB(c.path)
+		if err != nil {
+			return nil, err
+		}
+		c.mdb = mdb
+	}
+	return backend.OpenQueryOnHandle(c.mdb, query)
 }
 
 var _ driver.Driver = (*Driver)(nil)

@@ -12,25 +12,47 @@ import (
 // Query represents an open query on an MDB database.
 // It provides methods to iterate over rows and extract column values.
 type Query struct {
-	sql *SQL
+	sql     *SQL
+	ownsMdb bool
 }
 
 // OpenQuery opens an MDB database and executes a SQL query.
-// It returns a Query handle or an error.
+// The returned Query owns the MdbHandle and closes it when Close() is called.
 func OpenQuery(path, query string) (*Query, error) {
 	mdb, err := OpenMDB(path)
 	if err != nil {
 		return nil, err
 	}
 
-	sql, err := mdb.OpenQuery(query)
+	q, err := openQueryOnMdb(mdb, query)
 	if err != nil {
 		mdb.Close()
 		return nil, err
 	}
+	q.ownsMdb = true
+	return q, nil
+}
+
+// OpenQueryOnHandle executes a SQL query on an already-open MdbHandle.
+// The returned Query does NOT own the MdbHandle — Close() on the Query
+// will not close the underlying file. The caller is responsible for the
+// MdbHandle's lifecycle.
+func OpenQueryOnHandle(mdb *MdbHandle, query string) (*Query, error) {
+	q, err := openQueryOnMdb(mdb, query)
+	if err != nil {
+		return nil, err
+	}
+	q.ownsMdb = false
+	return q, nil
+}
+
+func openQueryOnMdb(mdb *MdbHandle, query string) (*Query, error) {
+	sql, err := mdb.OpenQuery(query)
+	if err != nil {
+		return nil, err
+	}
 
 	if sql.ColumnCount() == 0 && sql.CurTable == nil {
-		mdb.Close()
 		return nil, &Error{Msg: "mdb: query produced no columns"}
 	}
 
@@ -38,11 +60,13 @@ func OpenQuery(path, query string) (*Query, error) {
 }
 
 // Close frees resources associated with the query.
+// If the Query owns its MdbHandle (created via OpenQuery), the handle is closed.
+// If created via OpenQueryOnHandle, the MdbHandle is left open.
 func (q *Query) Close() error {
 	if q.sql == nil {
 		return nil
 	}
-	if q.sql.Mdb != nil {
+	if q.ownsMdb && q.sql.Mdb != nil {
 		q.sql.Mdb.Close()
 	}
 	q.sql = nil
