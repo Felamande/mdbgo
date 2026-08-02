@@ -1,6 +1,7 @@
 package gomdb
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"strconv"
@@ -145,6 +146,8 @@ func (mdb *MdbHandle) ReadRow(table *MdbTableDef, row int) (bool, error) {
 // attemptBind binds a field value to a column.
 func (mdb *MdbHandle) attemptBind(col *MdbColumn, field *MdbField) {
 	col.CurValueIsNull = field.IsNull
+	col.CurValueText = ""
+	col.CurValueTextValid = false
 	if col.ColType == TypeBool {
 		col.CurValueIsNull = false
 	}
@@ -161,6 +164,7 @@ func (mdb *MdbHandle) attemptBind(col *MdbColumn, field *MdbField) {
 			} else {
 				copy(col.BindPtr[:], "0")
 			}
+			col.BindLen = 1
 		}
 	} else if field.IsNull {
 		col.CurValueStart = 0
@@ -168,11 +172,13 @@ func (mdb *MdbHandle) attemptBind(col *MdbColumn, field *MdbField) {
 		if col.BindPtr != nil {
 			col.BindPtr[0] = 0
 		}
+		col.BindLen = 0
 	} else if col.ColType == TypeOLE {
 		col.CurValueStart = field.Start
 		col.CurValueLen = field.Siz
 		if col.BindPtr != nil && field.Siz >= MemoOverhead {
 			copy(col.BindPtr[:MemoOverhead], mdb.pgBuf[field.Start:field.Start+MemoOverhead])
+			col.BindLen = MemoOverhead
 		}
 	} else {
 		col.CurValueStart = field.Start
@@ -186,8 +192,43 @@ func (mdb *MdbHandle) attemptBind(col *MdbColumn, field *MdbField) {
 			if len(str) < len(col.BindPtr) {
 				col.BindPtr[len(str)] = 0
 			}
+			col.BindLen = len(str)
 		}
 	}
+}
+
+// columnValueToString lazily produces the compatibility string for a bound
+// column. Native consumers can therefore avoid formatting values they do not
+// request.
+func (mdb *MdbHandle) columnValueToString(col *MdbColumn) string {
+	if col == nil {
+		return ""
+	}
+	// Boolean columns are represented as non-null 0/1 strings by the legacy
+	// binder even when the row's physical field has zero payload bytes.
+	if col.ColType == TypeBool {
+		if col.CurValueLen != 0 {
+			col.CurValueText = "1"
+		} else {
+			col.CurValueText = "0"
+		}
+		col.CurValueTextValid = true
+		return col.CurValueText
+	}
+	if col.CurValueIsNull {
+		return ""
+	}
+	if col.CurValueTextValid {
+		return col.CurValueText
+	}
+	field := MdbField{
+		Start:  col.CurValueStart,
+		Siz:    col.CurValueLen,
+		IsNull: col.CurValueIsNull,
+	}
+	col.CurValueText = mdb.colToString(col, &field)
+	col.CurValueTextValid = true
+	return col.CurValueText
 }
 
 // colToString converts a column value to its string representation.
@@ -221,7 +262,7 @@ func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
 		return strconv.FormatFloat(d, 'g', 16, 64)
 
 	case TypeText:
-		return UnicodeToUTF8(mdb.pgBuf[field.Start:field.Start+field.Siz], mdb.IsJet4())
+		return mdb.unicodeToUTF8(mdb.pgBuf[field.Start : field.Start+field.Siz])
 
 	case TypeDateTime:
 		return mdb.dateTimeToString(col)
@@ -244,6 +285,14 @@ func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
 		}
 		return string(mdb.pgBuf[field.Start : field.Start+field.Siz])
 
+	case TypeOLE:
+		// The historical binder exposed the twelve-byte OLE header through
+		// Value(); retain that representation for lazy callers.
+		if field.Siz < MemoOverhead {
+			return ""
+		}
+		return string(mdb.pgBuf[field.Start : field.Start+MemoOverhead])
+
 	default:
 		return ""
 	}
@@ -258,11 +307,90 @@ func (mdb *MdbHandle) dateTimeToString(col *MdbColumn) string {
 
 // DateTimeValue returns the time.Time for a DateTime column.
 func (mdb *MdbHandle) DateTimeValue(col *MdbColumn) (time.Time, bool) {
-	if col.CurValueIsNull || col.ColType != TypeDateTime {
+	if col == nil || col.CurValueIsNull || col.ColType != TypeDateTime {
 		return time.Time{}, false
 	}
 	td := GetDouble(mdb.pgBuf[:], col.CurValueStart)
 	return DateToTime(td), true
+}
+
+// BoolValue returns a native boolean for a Boolean column.
+func (mdb *MdbHandle) BoolValue(col *MdbColumn) (bool, bool) {
+	if col == nil || col.CurValueIsNull || col.ColType != TypeBool {
+		return false, false
+	}
+	return col.CurValueLen != 0, true
+}
+
+// Int64Value returns a native integer for the integral Access column types.
+func (mdb *MdbHandle) Int64Value(col *MdbColumn) (int64, bool) {
+	if col == nil || col.CurValueIsNull {
+		return 0, false
+	}
+	buf := mdb.pgBuf[:]
+	start := col.CurValueStart
+	switch col.ColType {
+	case TypeBool:
+		return int64(col.CurValueLen), true
+	case TypeByte:
+		if col.CurValueLen < 1 {
+			return 0, false
+		}
+		return int64(buf[start]), true
+	case TypeInt:
+		if col.CurValueLen < 2 {
+			return 0, false
+		}
+		return int64(GetInt16(buf, start)), true
+	case TypeLongInt, TypeComplex:
+		if col.CurValueLen < 4 {
+			return 0, false
+		}
+		return int64(GetInt32(buf, start)), true
+	default:
+		return 0, false
+	}
+}
+
+// Float64Value returns a native floating-point value for floating and Currency
+// columns. Currency is stored as a signed 64-bit integer scaled by 10,000.
+func (mdb *MdbHandle) Float64Value(col *MdbColumn) (float64, bool) {
+	if col == nil || col.CurValueIsNull {
+		return 0, false
+	}
+	start := col.CurValueStart
+	switch col.ColType {
+	case TypeFloat:
+		if col.CurValueLen < 4 {
+			return 0, false
+		}
+		return compatibilityFloat64(float64(GetSingle(mdb.pgBuf[:], start)), 8, 32), true
+	case TypeDouble:
+		if col.CurValueLen < 8 {
+			return 0, false
+		}
+		return compatibilityFloat64(GetDouble(mdb.pgBuf[:], start), 16, 64), true
+	case TypeMoney:
+		if col.CurValueLen < 8 {
+			return 0, false
+		}
+		return float64(int64(binary.LittleEndian.Uint64(mdb.pgBuf[start:]))) / 10000, true
+	default:
+		return 0, false
+	}
+}
+
+// compatibilityFloat64 reproduces the value historically exposed by the SQL
+// drivers after mdbtools' %.8g/%.16g formatting and ParseFloat conversion.
+// AppendFloat uses stack scratch, avoiding the old per-cell string pipeline.
+func compatibilityFloat64(value float64, precision, bitSize int) float64 {
+	var scratch [32]byte
+	formatted := strconv.AppendFloat(scratch[:0], value, 'g', precision, bitSize)
+	parsed, err := strconv.ParseFloat(string(formatted), 64)
+	if err != nil {
+		return value
+	}
+	return parsed
 }
 
 // DateToTime converts an Access date double to a time.Time.
@@ -336,10 +464,7 @@ func (mdb *MdbHandle) memoToString(start, size int) string {
 
 	if memoLen&0x80000000 != 0 {
 		// Inline memo
-		return UnicodeToUTF8(
-			mdb.pgBuf[start+MemoOverhead:start+size],
-			mdb.IsJet4(),
-		)
+		return mdb.unicodeToUTF8(mdb.pgBuf[start+MemoOverhead : start+size])
 	} else if memoLen&0x40000000 != 0 {
 		// Single-page memo
 		pgRow := GetInt32(mdb.pgBuf[:], start+4)
@@ -347,10 +472,10 @@ func (mdb *MdbHandle) memoToString(start, size int) string {
 		if err != nil {
 			return ""
 		}
-		return UnicodeToUTF8(buf[rowStart:rowStart+length], mdb.IsJet4())
+		return mdb.unicodeToUTF8(buf[rowStart : rowStart+length])
 	} else if (memoLen & 0xFF000000) == 0 {
 		// Multi-page memo
-		var result []byte
+		result := mdb.memoBuf[:0]
 		pgRow := GetInt32(mdb.pgBuf[:], start+4)
 		for {
 			buf, rowStart, length, err := mdb.findPgRow(pgRow)
@@ -363,7 +488,8 @@ func (mdb *MdbHandle) memoToString(start, size int) string {
 				break
 			}
 		}
-		return UnicodeToUTF8(result, mdb.IsJet4())
+		mdb.memoBuf = result
+		return mdb.unicodeToUTF8(result)
 	}
 
 	return ""

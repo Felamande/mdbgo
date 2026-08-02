@@ -135,6 +135,30 @@ func (q *Query) DateTimeValue(i int) (time.Time, bool) {
 	return q.sql.DateTimeValue(i)
 }
 
+// BoolValue returns a native Boolean value for column i.
+func (q *Query) BoolValue(i int) (bool, bool) {
+	if q.sql == nil {
+		return false, false
+	}
+	return q.sql.BoolValue(i)
+}
+
+// Int64Value returns a native integral value for column i.
+func (q *Query) Int64Value(i int) (int64, bool) {
+	if q.sql == nil {
+		return 0, false
+	}
+	return q.sql.Int64Value(i)
+}
+
+// Float64Value returns a native floating-point value for column i.
+func (q *Query) Float64Value(i int) (float64, bool) {
+	if q.sql == nil {
+		return 0, false
+	}
+	return q.sql.Float64Value(i)
+}
+
 // ParseInt parses a string as an int64. Returns (value, true) on success.
 func ParseInt(s string) (int64, bool) {
 	v, err := strconv.ParseInt(s, 10, 64)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,16 +233,17 @@ func (r *Rows) value(index int) driver.Value {
 	if r.h.IsNull(index) {
 		return nil
 	}
-	raw := r.h.Value(index)
 	switch r.info[index].Type {
 	case backend.TypeBool:
-		return raw == "1" || strings.EqualFold(raw, "true")
+		if v, ok := r.h.BoolValue(index); ok {
+			return v
+		}
 	case backend.TypeByte, backend.TypeInt, backend.TypeLongInt, backend.TypeComplex:
-		if v, ok := backend.ParseInt(raw); ok {
+		if v, ok := r.h.Int64Value(index); ok {
 			return v
 		}
 	case backend.TypeMoney, backend.TypeFloat, backend.TypeDouble:
-		if v, ok := backend.ParseFloat(raw); ok {
+		if v, ok := r.h.Float64Value(index); ok {
 			return v
 		}
 	case backend.TypeDateTime:
@@ -251,7 +253,7 @@ func (r *Rows) value(index int) driver.Value {
 	case backend.TypeBinary:
 		return r.h.BinaryValue(index)
 	}
-	return raw
+	return r.h.Value(index)
 }
 
 var _ driver.Rows = (*Rows)(nil)
@@ -265,44 +267,38 @@ var _ driver.RowsColumnTypeScanType = (*Rows)(nil)
 func interpolateQuery(query string, args []driver.NamedValue) (string, error) {
 	var b strings.Builder
 	argIndex := 0
+	lastCopy := 0
 	inSingle, inDouble, inBracket := false, false, false
 
 	for i := 0; i < len(query); i++ {
 		ch := query[i]
 		switch ch {
 		case '\'':
-			b.WriteByte(ch)
 			if inSingle && i+1 < len(query) && query[i+1] == '\'' {
 				i++
-				b.WriteByte(query[i])
 				continue
 			}
 			if !inDouble && !inBracket {
 				inSingle = !inSingle
 			}
 		case '"':
-			b.WriteByte(ch)
 			if inDouble && i+1 < len(query) && query[i+1] == '"' {
 				i++
-				b.WriteByte(query[i])
 				continue
 			}
 			if !inSingle && !inBracket {
 				inDouble = !inDouble
 			}
 		case '[':
-			b.WriteByte(ch)
 			if !inSingle && !inDouble {
 				inBracket = true
 			}
 		case ']':
-			b.WriteByte(ch)
 			if !inSingle && !inDouble {
 				inBracket = false
 			}
 		case '?':
 			if inSingle || inDouble || inBracket {
-				b.WriteByte(ch)
 				continue
 			}
 			if argIndex >= len(args) {
@@ -312,15 +308,22 @@ func interpolateQuery(query string, args []driver.NamedValue) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			if argIndex == 0 {
+				b.Grow(len(query) + len(lit))
+			}
+			b.WriteString(query[lastCopy:i])
 			b.WriteString(lit)
+			lastCopy = i + 1
 			argIndex++
-		default:
-			b.WriteByte(ch)
 		}
 	}
 	if argIndex != len(args) {
 		return "", errors.New("mdb: too many query arguments")
 	}
+	if argIndex == 0 {
+		return query, nil
+	}
+	b.WriteString(query[lastCopy:])
 	return b.String(), nil
 }
 
@@ -373,15 +376,15 @@ func sqlLiteral(v driver.Value) (string, error) {
 		}
 		return "0", nil
 	case int64:
-		return fmt.Sprintf("%d", x), nil
+		return strconv.FormatInt(x, 10), nil
 	case float64:
-		return fmt.Sprintf("%.16g", x), nil
+		return strconv.FormatFloat(x, 'g', 16, 64), nil
 	case string:
 		return "'" + strings.ReplaceAll(x, "'", "''") + "'", nil
 	case []byte:
 		return "'" + strings.ReplaceAll(string(x), "'", "''") + "'", nil
 	case time.Time:
-		return fmt.Sprintf("strptime('%s','%%Y-%%m-%%d %%H:%%M:%%S')", x.Format("2006-01-02 15:04:05")), nil
+		return "strptime('" + x.Format("2006-01-02 15:04:05") + "','%Y-%m-%d %H:%M:%S')", nil
 	default:
 		return "", fmt.Errorf("mdb: unsupported query argument type %T", v)
 	}

@@ -46,7 +46,6 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 
 	mdb.RewindTable(table)
 
-	bindBuf := make([]byte, mdb.bindSize)
 	for {
 		hasRow, err := mdb.FetchRow(table)
 		if err != nil {
@@ -79,7 +78,7 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 
 			// Read LvProp (KKD data) if present
 			if !lvPropCol.CurValueIsNull {
-				kkd, kkdLen, err := mdb.OleReadFull(lvPropCol, bindBuf)
+				kkd, kkdLen, err := mdb.OleReadFull(lvPropCol, nil)
 				if err == nil && kkdLen > 0 {
 					entry.Props = kkdToProps(mdb, kkd, kkdLen)
 				}
@@ -119,6 +118,10 @@ func (mdb *MdbHandle) GetBoundValue(table *MdbTableDef, idx int) string {
 	col := table.Columns[idx]
 	if col.BindPtr == nil {
 		return ""
+	}
+	if col.BindLen > 0 && col.BindLen <= len(col.BindPtr) {
+		value := col.BindPtr[:col.BindLen]
+		return string(value[:clen(value)])
 	}
 	return string(col.BindPtr[:clen(col.BindPtr)])
 }

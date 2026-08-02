@@ -35,7 +35,12 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 			rowVarCols = GetInt16(mdb.pgBuf[:], rowEnd-bitmaskSz-1)
 		}
 
-		varColOffsets = make([]int, rowVarCols+1)
+		need := rowVarCols + 1
+		if cap(table.varOffsetsBuf) < need {
+			table.varOffsetsBuf = make([]int, need)
+		}
+		varColOffsets = table.varOffsetsBuf[:need]
+		clear(varColOffsets)
 
 		if mdb.IsJet3() {
 			crackRow3Offsets(mdb, rowStart, rowEnd, bitmaskSz, rowVarCols, varColOffsets)
@@ -59,6 +64,7 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 	for i := 0; i < table.NumCols; i++ {
 		col := table.Columns[i]
 		f := &fields[i]
+		f.Value = nil
 		f.ColNum = i
 		f.IsFixed = col.IsFixed
 

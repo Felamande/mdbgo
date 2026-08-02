@@ -2,6 +2,7 @@ package gomdb
 
 import (
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // decompressUnicode decompresses an Access "Unicode Compressed" string.
@@ -44,22 +45,106 @@ func decompressUnicode(src []byte) []byte {
 	return dst
 }
 
+func appendUTF16Unit(dst []byte, pendingHigh *uint16, unit uint16) []byte {
+	if *pendingHigh != 0 {
+		if unit >= 0xdc00 && unit <= 0xdfff {
+			dst = utf8.AppendRune(dst, utf16.DecodeRune(rune(*pendingHigh), rune(unit)))
+			*pendingHigh = 0
+			return dst
+		}
+		dst = utf8.AppendRune(dst, utf8.RuneError)
+		*pendingHigh = 0
+	}
+
+	switch {
+	case unit >= 0xd800 && unit <= 0xdbff:
+		*pendingHigh = unit
+	case unit >= 0xdc00 && unit <= 0xdfff:
+		dst = utf8.AppendRune(dst, utf8.RuneError)
+	default:
+		dst = utf8.AppendRune(dst, rune(unit))
+	}
+	return dst
+}
+
+func appendUTF16LE(dst, src []byte) []byte {
+	var pendingHigh uint16
+	for len(src) >= 2 {
+		unit := uint16(src[0]) | uint16(src[1])<<8
+		dst = appendUTF16Unit(dst, &pendingHigh, unit)
+		src = src[2:]
+	}
+	if pendingHigh != 0 {
+		dst = utf8.AppendRune(dst, utf8.RuneError)
+	}
+	return dst
+}
+
+func appendCompressedUnicode(dst, src []byte) []byte {
+	compressed := true
+	var pendingHigh uint16
+	for i := 0; i < len(src); {
+		if src[i] == 0 {
+			compressed = !compressed
+			i++
+			continue
+		}
+		if compressed {
+			dst = appendUTF16Unit(dst, &pendingHigh, uint16(src[i]))
+			i++
+			continue
+		}
+		if i+1 >= len(src) {
+			break
+		}
+		unit := uint16(src[i]) | uint16(src[i+1])<<8
+		dst = appendUTF16Unit(dst, &pendingHigh, unit)
+		i += 2
+	}
+	if pendingHigh != 0 {
+		dst = utf8.AppendRune(dst, utf8.RuneError)
+	}
+	return dst
+}
+
+func appendLatin1UTF8(dst, src []byte) []byte {
+	for _, b := range src {
+		if b < utf8.RuneSelf {
+			dst = append(dst, b)
+		} else {
+			dst = utf8.AppendRune(dst, rune(b))
+		}
+	}
+	return dst
+}
+
+func appendUnicodeUTF8(dst, src []byte, isJet4 bool) []byte {
+	if !isJet4 {
+		return appendLatin1UTF8(dst, src)
+	}
+	if len(src) >= 2 && src[0] == 0xff && src[1] == 0xfe {
+		return appendCompressedUnicode(dst, src[2:])
+	}
+	return appendUTF16LE(dst, src)
+}
+
+func unicodeUTF8Capacity(src []byte, isJet4 bool) int {
+	if !isJet4 {
+		return len(src) * 2
+	}
+	if len(src) >= 2 && src[0] == 0xff && src[1] == 0xfe {
+		return (len(src) - 2) * 2
+	}
+	return (len(src) / 2) * 3
+}
+
 // ucs2ToUTF8 converts a UCS-2LE encoded byte slice to a UTF-8 string.
 func ucs2ToUTF8(src []byte) string {
 	if len(src) == 0 {
 		return ""
 	}
-
-	// Convert bytes to []uint16 (UCS-2 code units)
-	n := len(src) / 2
-	u16 := make([]uint16, n)
-	for i := 0; i < n; i++ {
-		u16[i] = uint16(src[i*2]) | uint16(src[i*2+1])<<8
-	}
-
-	// Decode UTF-16 (UCS-2 is a subset of UTF-16, but handle surrogates too)
-	runes := utf16.Decode(u16)
-	return string(runes)
+	dst := make([]byte, 0, (len(src)/2)*3)
+	return string(appendUTF16LE(dst, src))
 }
 
 // UnicodeToUTF8 converts an Access string (possibly Unicode Compressed) to a UTF-8 string.
@@ -76,21 +161,16 @@ func UnicodeToUTF8(src []byte, isJet4 bool) string {
 		return ""
 	}
 
-	var decompressed []byte
+	dst := make([]byte, 0, unicodeUTF8Capacity(src, isJet4))
+	return string(appendUnicodeUTF8(dst, src, isJet4))
+}
 
-	if isJet4 && len(src) >= 2 && src[0] == 0xFF && src[1] == 0xFE {
-		// Unicode Compressed format (Jet4)
-		decompressed = decompressUnicode(src[2:])
-	} else if isJet4 {
-		// Uncompressed UCS-2LE (Jet4)
-		decompressed = src
-	} else {
-		// Jet3: single-byte encoding (typically Windows-1252 / Latin-1)
-		// For now, treat as Latin-1 → UTF-8
-		return latin1ToUTF8(src)
+func (mdb *MdbHandle) unicodeToUTF8(src []byte) string {
+	if len(src) == 0 {
+		return ""
 	}
-
-	return ucs2ToUTF8(decompressed)
+	mdb.unicodeBuf = appendUnicodeUTF8(mdb.unicodeBuf[:0], src, mdb.IsJet4())
+	return string(mdb.unicodeBuf)
 }
 
 // UnicodeToUTF8Len converts bytes and returns both the UTF-8 string and its byte length.
@@ -103,11 +183,8 @@ func UnicodeToUTF8Len(src []byte, isJet4 bool) (string, int) {
 // Characters 0x00-0x7F are single bytes in UTF-8.
 // Characters 0x80-0xFF are encoded as 2-byte UTF-8 sequences.
 func latin1ToUTF8(src []byte) string {
-	runes := make([]rune, len(src))
-	for i, b := range src {
-		runes[i] = rune(b)
-	}
-	return string(runes)
+	dst := make([]byte, 0, len(src)*2)
+	return string(appendLatin1UTF8(dst, src))
 }
 
 // Jet3CodePageToUTF8 converts a Jet3 string using the specified code page to UTF-8.
@@ -127,19 +204,16 @@ func Jet3CodePageToUTF8(src []byte, codePage uint16) string {
 	}
 }
 
-// ASCIItoUCS2 converts an ASCII/UTF-8 string to UCS-2LE bytes, used for temp table
-// field packing in LIST TABLES and DESCRIBE TABLE commands.
+// ASCIItoUCS2 widens each source byte to UCS-2LE, matching mdbtools' legacy
+// temp-table conversion used by LIST TABLES and DESCRIBE TABLE. This is
+// intentionally byte-oriented rather than a UTF-8-to-UTF-16 conversion.
 func ASCIItoUCS2(src string) []byte {
 	if len(src) == 0 {
 		return nil
 	}
 	dst := make([]byte, len(src)*2)
-	for i, r := range src {
-		// Only handle ASCII range for temp table usage
-		if r < 256 {
-			dst[i*2] = byte(r)
-			dst[i*2+1] = 0
-		}
+	for i := 0; i < len(src); i++ {
+		dst[i*2] = src[i]
 	}
 	return dst
 }

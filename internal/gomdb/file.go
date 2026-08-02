@@ -20,16 +20,20 @@ type MdbFile struct {
 
 // MdbHandle holds all state for reading an MDB database.
 type MdbHandle struct {
-	f       *MdbFile
-	curPg   uint32
-	curPos  int
-	pgBuf   [PageSize]byte
+	f        *MdbFile
+	curPg    uint32
+	curPos   int
+	pgBuf    [PageSize]byte
 	altPgBuf [PageSize]byte
-	fmt     *MdbFormatConstants
+	altPg    uint32
+	altValid bool
+	fmt      *MdbFormatConstants
 
-	bindSize       int
-	dateFmt        string
-	shortDateFmt   string
+	bindSize     int
+	dateFmt      string
+	shortDateFmt string
+	unicodeBuf   []byte
+	memoBuf      []byte
 
 	// Catalog
 	numCatalog int
@@ -154,32 +158,8 @@ func (mdb *MdbHandle) readPage(pg uint32) error {
 		return nil // already loaded
 	}
 
-	offset := int64(pg) * int64(mdb.fmt.PgSize)
-	if offset >= mdb.f.size {
-		return fmt.Errorf("gomdb: page %d is beyond EOF (offset %d, size %d)", pg, offset, mdb.f.size)
-	}
-
-	buf := mdb.pgBuf[:mdb.fmt.PgSize]
-	n, err := mdb.f.stream.ReadAt(buf, offset)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("gomdb: error reading page %d: %w", pg, err)
-	}
-
-	// Zero-fill partial reads
-	for i := n; i < mdb.fmt.PgSize; i++ {
-		buf[i] = 0
-	}
-
-	// Decrypt if needed (pages other than page 0 with a db key)
-	if pg != 0 && mdb.f.dbKey != 0 {
-		tmpKeyVal := mdb.f.dbKey ^ pg
-		tmpKey := []byte{
-			byte(tmpKeyVal & 0xFF),
-			byte((tmpKeyVal >> 8) & 0xFF),
-			byte((tmpKeyVal >> 16) & 0xFF),
-			byte((tmpKeyVal >> 24) & 0xFF),
-		}
-		rc4Decrypt(tmpKey, buf[:mdb.fmt.PgSize])
+	if err := mdb.readPageInto(mdb.pgBuf[:], pg); err != nil {
+		return err
 	}
 
 	mdb.curPg = pg
@@ -189,27 +169,41 @@ func (mdb *MdbHandle) readPage(pg uint32) error {
 
 // readAltPage reads a page by number into altPgBuf.
 func (mdb *MdbHandle) readAltPage(pg uint32) error {
-	offset := int64(pg) * int64(mdb.fmt.PgSize)
-	if offset >= mdb.f.size {
-		return fmt.Errorf("gomdb: page %d is beyond EOF", pg)
+	if mdb.altValid && mdb.altPg == pg {
+		return nil
 	}
 
-	buf := mdb.altPgBuf[:mdb.fmt.PgSize]
-	n, err := mdb.f.stream.ReadAt(buf, offset)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("gomdb: error reading alt page %d: %w", pg, err)
+	if err := mdb.readPageInto(mdb.altPgBuf[:], pg); err != nil {
+		return err
 	}
-	for i := n; i < mdb.fmt.PgSize; i++ {
-		buf[i] = 0
-	}
+	mdb.altPg = pg
+	mdb.altValid = true
 	return nil
 }
 
-// swapPgBuf swaps the main and alternate page buffers.
-func (mdb *MdbHandle) swapPgBuf() {
-	for i := 0; i < PageSize; i++ {
-		mdb.pgBuf[i], mdb.altPgBuf[i] = mdb.altPgBuf[i], mdb.pgBuf[i]
+// readPageInto reads and decrypts a page into dst. Keeping the disk I/O and
+// decryption path shared is important: rows referenced through pg_row values
+// are read through the alternate buffer and may live in encrypted databases.
+func (mdb *MdbHandle) readPageInto(dst []byte, pg uint32) error {
+	pgSize := mdb.fmt.PgSize
+	offset := int64(pg) * int64(pgSize)
+	if offset >= mdb.f.size {
+		return fmt.Errorf("gomdb: page %d is beyond EOF (offset %d, size %d)", pg, offset, mdb.f.size)
 	}
+
+	buf := dst[:pgSize]
+	n, err := mdb.f.stream.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("gomdb: error reading page %d: %w", pg, err)
+	}
+	clear(buf[n:])
+
+	if pg != 0 && mdb.f.dbKey != 0 {
+		key := mdb.f.dbKey ^ pg
+		tmpKey := [4]byte{byte(key), byte(key >> 8), byte(key >> 16), byte(key >> 24)}
+		rc4Decrypt(tmpKey[:], buf)
+	}
+	return nil
 }
 
 // Close closes the MDB handle and releases resources.
@@ -379,10 +373,7 @@ func (mdb *MdbHandle) findPgRow(pgRow int) (buf []byte, offset int, length int, 
 	if err := mdb.readAltPage(pg); err != nil {
 		return nil, 0, 0, err
 	}
-	mdb.swapPgBuf()
-	off, sz, err := mdb.findRow(row)
-	mdb.swapPgBuf()
-
+	off, sz, err := mdb.findRowIn(mdb.altPgBuf[:], row)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -392,16 +383,21 @@ func (mdb *MdbHandle) findPgRow(pgRow int) (buf []byte, offset int, length int, 
 
 // findRow locates a row within the current page and returns its offset and length.
 func (mdb *MdbHandle) findRow(row int) (start int, length int, err error) {
+	return mdb.findRowIn(mdb.pgBuf[:], row)
+}
+
+// findRowIn locates a row in buf without changing the handle's active page.
+func (mdb *MdbHandle) findRowIn(buf []byte, row int) (start int, length int, err error) {
 	rco := mdb.fmt.RowCountOffset
 
 	if row > 1000 {
 		return 0, 0, fmt.Errorf("gomdb: row %d exceeds maximum", row)
 	}
 
-	start = GetInt16(mdb.pgBuf[:], rco+2+row*2)
+	start = GetInt16(buf, rco+2+row*2)
 	nextStart := mdb.fmt.PgSize
 	if row > 0 {
-		nextStart = GetInt16(mdb.pgBuf[:], rco+row*2) & OffsetMask
+		nextStart = GetInt16(buf, rco+row*2) & OffsetMask
 	}
 	length = nextStart - (start & OffsetMask)
 

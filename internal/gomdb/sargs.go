@@ -6,10 +6,13 @@ type SargNode struct {
 	Col      *MdbColumn
 	ValType  int // Type flag for the stored value
 	Value    MdbAny
-	Parent   *SargNode  // Internal: used during SQL parsing
+	Parent   *SargNode // Internal: used during SQL parsing
 	Children []*SargNode
 	Left     *SargNode
 	Right    *SargNode
+
+	ilikePattern    string
+	ilikePatternSet bool
 }
 
 // TestSargs evaluates the sarg tree against the provided fields.
@@ -141,7 +144,7 @@ func testSarg(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField) b
 		if field.IsNull {
 			return false
 		}
-		val := UnicodeToUTF8(field.Value, mdb.IsJet4())
+		val := mdb.unicodeToUTF8(field.Value)
 		return testString(node, val)
 
 	case TypeMemo, TypeRepID:
@@ -180,6 +183,9 @@ func testString(node *SargNode, s string) bool {
 	case OpLike:
 		return LikeCmp(s, node.Value.S)
 	case OpILike:
+		if node.ilikePatternSet {
+			return iLikeCmpFolded(s, node.ilikePattern)
+		}
 		return ILikeCmp(s, node.Value.S)
 	case OpEqual:
 		return s == node.Value.S

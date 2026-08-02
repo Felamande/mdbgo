@@ -30,21 +30,22 @@ type SQL struct {
 	Mdb *MdbHandle
 
 	// Parsed columns
-	Columns     []*SQLColumn
-	NumColumns  int
-	AllColumns  bool
-	SelCount    bool
+	Columns    []*SQLColumn
+	NumColumns int
+	AllColumns bool
+	SelCount   bool
 
 	// Parsed tables
-	Tables     []*SQLTable
-	NumTables  int
+	Tables    []*SQLTable
+	NumTables int
 
 	// Sarg tree (WHERE clause)
 	SargTree  *SargNode
 	SargStack []*SargNode
 
 	// Bound values
-	BoundValues [][]byte
+	BoundValues  [][]byte
+	BoundColumns []*MdbColumn
 
 	// Current table being queried
 	CurTable *MdbTableDef
@@ -125,22 +126,29 @@ func (mdb *MdbHandle) OpenQuery(query string) (*SQL, error) {
 	return sql, nil
 }
 
-// sqlBindAll binds all result columns so values can be extracted.
+// sqlBindAll resolves result columns once. Values are decoded lazily by the
+// SQL/driver getters; the old byte-buffer binding remains available through
+// sqlBindColumn for catalog and compatibility callers.
 func (mdb *MdbHandle) sqlBindAll(sql *SQL) error {
+	sql.BoundColumns = make([]*MdbColumn, sql.NumColumns)
 	for i := 0; i < sql.NumColumns; i++ {
-		sqlCol := sql.Columns[i]
-		// Find matching MdbColumn to compute the right buffer size
-		size := 256
-		for _, col := range sql.CurTable.Columns {
-			if equalFold(col.Name, sqlCol.Name) {
-				size = colBindSize(col)
-				break
-			}
+		col := mdb.resultColumn(sql, i)
+		if col == nil {
+			return fmt.Errorf("gomdb: column %q not found in table", sql.Columns[i].Name)
 		}
-		boundValue := make([]byte, size)
-		sql.BoundValues = append(sql.BoundValues, boundValue)
-		if err := mdb.sqlBindColumn(sql, i+1, boundValue); err != nil {
-			return err
+		sql.BoundColumns[i] = col
+	}
+	return nil
+}
+
+func (mdb *MdbHandle) resultColumn(sql *SQL, idx int) *MdbColumn {
+	if sql == nil || sql.CurTable == nil || idx < 0 || idx >= sql.NumColumns {
+		return nil
+	}
+	name := sql.Columns[idx].Name
+	for _, col := range sql.CurTable.Columns {
+		if equalFold(col.Name, name) {
+			return col
 		}
 	}
 	return nil
@@ -154,15 +162,21 @@ func (mdb *MdbHandle) sqlBindColumn(sql *SQL, colNum int, buf []byte) error {
 
 	sqlCol := sql.Columns[colNum-1]
 
-	// Find the matching MdbColumn in the current table
-	for _, col := range sql.CurTable.Columns {
-		if equalFold(col.Name, sqlCol.Name) {
-			col.BindPtr = buf[:colBindSize(col)]
-			return nil
-		}
+	col := mdb.resultColumn(sql, colNum-1)
+	if col == nil {
+		return fmt.Errorf("gomdb: column %q not found in table", sqlCol.Name)
 	}
-
-	return fmt.Errorf("gomdb: column %q not found in table", sqlCol.Name)
+	size := colBindSize(col)
+	if len(buf) < size {
+		return fmt.Errorf("gomdb: bind buffer for column %q is too small", sqlCol.Name)
+	}
+	col.BindPtr = buf[:size]
+	col.BindLen = 0
+	if len(sql.BoundColumns) < sql.NumColumns {
+		sql.BoundColumns = make([]*MdbColumn, sql.NumColumns)
+	}
+	sql.BoundColumns[colNum-1] = col
+	return nil
 }
 
 // --- Tokenizer ---
@@ -188,12 +202,12 @@ type token struct {
 }
 
 type lexer struct {
-	input []byte
+	input string
 	pos   int
 }
 
 func newLexer(query string) *lexer {
-	return &lexer{input: []byte(query), pos: 0}
+	return &lexer{input: query, pos: 0}
 }
 
 func (l *lexer) skipWS() {
@@ -245,7 +259,7 @@ func (l *lexer) next() token {
 				l.pos++
 			}
 		}
-		return token{typ: tokString, value: string(l.input[start:l.pos])}
+		return token{typ: tokString, value: l.input[start:l.pos]}
 
 	case ch == '[':
 		// Quoted identifier
@@ -254,7 +268,7 @@ func (l *lexer) next() token {
 		for l.pos < len(l.input) && l.input[l.pos] != ']' {
 			l.pos++
 		}
-		val := string(l.input[start:l.pos])
+		val := l.input[start:l.pos]
 		if l.pos < len(l.input) {
 			l.pos++ // skip ']'
 		}
@@ -278,7 +292,7 @@ func (l *lexer) next() token {
 				break
 			}
 		}
-		return token{typ: tokNumber, value: string(l.input[start:l.pos])}
+		return token{typ: tokNumber, value: l.input[start:l.pos]}
 
 	case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '#':
 		// Identifier or keyword
@@ -291,7 +305,7 @@ func (l *lexer) next() token {
 				break
 			}
 		}
-		return token{typ: tokIdent, value: string(l.input[start:l.pos])}
+		return token{typ: tokIdent, value: l.input[start:l.pos]}
 
 	case ch == '"':
 		// Double-quoted identifier
@@ -304,7 +318,7 @@ func (l *lexer) next() token {
 				l.pos++
 			}
 		}
-		val := string(l.input[start:l.pos])
+		val := l.input[start:l.pos]
 		if l.pos < len(l.input) {
 			l.pos++
 		}
@@ -313,14 +327,14 @@ func (l *lexer) next() token {
 	default:
 		// Operators and other single chars
 		if l.pos+1 < len(l.input) {
-			two := string([]byte{l.input[l.pos], l.input[l.pos+1]})
+			two := l.input[l.pos : l.pos+2]
 			switch two {
 			case "<>", "<=", ">=":
 				l.pos += 2
 				return token{typ: tokIdent, value: two}
 			}
 		}
-		val := string(ch)
+		val := l.input[l.pos : l.pos+1]
 		l.pos++
 		return token{typ: tokIdent, value: val}
 	}
@@ -329,10 +343,10 @@ func (l *lexer) next() token {
 // --- Recursive Descent Parser ---
 
 type parser struct {
-	l       *lexer
-	sql     *SQL
-	cur     token
-	peeked  bool
+	l      *lexer
+	sql    *SQL
+	cur    token
+	peeked bool
 }
 
 func newParser(sql *SQL, query string) *parser {
@@ -379,14 +393,10 @@ func (p *parser) parse() error {
 		return fmt.Errorf("gomdb: expected SELECT, got %v", tok)
 	}
 
-	upper := strings.ToUpper(tok.value)
-
-	switch upper {
-	case "SELECT":
-		return p.parseSelectStmt()
-	default:
+	if !equalFold(tok.value, "SELECT") {
 		return fmt.Errorf("gomdb: unexpected keyword %q", tok.value)
 	}
+	return p.parseSelectStmt()
 }
 
 func (p *parser) parseSelectStmt() error {
@@ -397,7 +407,7 @@ func (p *parser) parseSelectStmt() error {
 
 	// Expect FROM
 	fromTok := p.next()
-	if strings.ToUpper(fromTok.value) != "FROM" {
+	if !equalFold(fromTok.value, "FROM") {
 		return fmt.Errorf("gomdb: expected FROM, got %q", fromTok.value)
 	}
 
@@ -413,19 +423,18 @@ func (p *parser) parseSelectStmt() error {
 			break
 		}
 
-		upper := strings.ToUpper(tok.value)
-		switch upper {
-		case "WHERE":
+		switch {
+		case equalFold(tok.value, "WHERE"):
 			p.next()
 			if err := p.parseWhereClause(); err != nil {
 				return err
 			}
-		case "ORDER":
+		case equalFold(tok.value, "ORDER"):
 			p.next()
 			if err := p.parseOrderBy(); err != nil {
 				return err
 			}
-		case "LIMIT":
+		case equalFold(tok.value, "LIMIT"):
 			p.next()
 			if err := p.parseLimit(); err != nil {
 				return err
@@ -451,13 +460,13 @@ func (p *parser) parseSelectList() error {
 		}
 
 		if tok.typ == tokIdent {
-			upper := strings.ToUpper(tok.value)
-			if upper == "FROM" || upper == "WHERE" || upper == "ORDER" || upper == "LIMIT" {
+			if equalFold(tok.value, "FROM") || equalFold(tok.value, "WHERE") ||
+				equalFold(tok.value, "ORDER") || equalFold(tok.value, "LIMIT") {
 				break
 			}
 
 			// Handle COUNT(*)
-			if upper == "COUNT" {
+			if equalFold(tok.value, "COUNT") {
 				p.next()
 				p.next() // (
 				p.next() // *
@@ -512,7 +521,7 @@ func (p *parser) parseOr() (*SargNode, error) {
 
 	for {
 		tok := p.peek()
-		if tok.typ == tokIdent && strings.ToUpper(tok.value) == "OR" {
+		if tok.typ == tokIdent && equalFold(tok.value, "OR") {
 			p.next()
 			right, err := p.parseAnd()
 			if err != nil {
@@ -540,7 +549,7 @@ func (p *parser) parseAnd() (*SargNode, error) {
 
 	for {
 		tok := p.peek()
-		if tok.typ == tokIdent && strings.ToUpper(tok.value) == "AND" {
+		if tok.typ == tokIdent && equalFold(tok.value, "AND") {
 			p.next()
 			right, err := p.parseNot()
 			if err != nil {
@@ -562,7 +571,7 @@ func (p *parser) parseAnd() (*SargNode, error) {
 
 func (p *parser) parseNot() (*SargNode, error) {
 	tok := p.peek()
-	if tok.typ == tokIdent && strings.ToUpper(tok.value) == "NOT" {
+	if tok.typ == tokIdent && equalFold(tok.value, "NOT") {
 		p.next()
 		left, err := p.parseNot()
 		if err != nil {
@@ -574,6 +583,30 @@ func (p *parser) parseNot() (*SargNode, error) {
 		}, nil
 	}
 	return p.parseComparison()
+}
+
+func comparisonOp(value string) (int, bool) {
+	switch value {
+	case "=":
+		return OpEqual, true
+	case "<":
+		return OpLT, true
+	case ">":
+		return OpGT, true
+	case "<=":
+		return OpLTEQ, true
+	case ">=":
+		return OpGTEQ, true
+	case "<>":
+		return OpNEQ, true
+	}
+	if equalFold(value, "LIKE") {
+		return OpLike, true
+	}
+	if equalFold(value, "ILIKE") {
+		return OpILike, true
+	}
+	return 0, false
 }
 
 func (p *parser) parseComparison() (*SargNode, error) {
@@ -610,19 +643,17 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}, nil
 	}
 
-	upper := strings.ToUpper(nextTok.value)
-
 	// Handle IS NULL / IS NOT NULL
-	if upper == "IS" {
+	if equalFold(nextTok.value, "IS") {
 		p.next()
 		notNull := false
 		peek := p.peek()
-		if strings.ToUpper(peek.value) == "NOT" {
+		if equalFold(peek.value, "NOT") {
 			p.next()
 			notNull = true
 		}
 		nullTok := p.next()
-		if strings.ToUpper(nullTok.value) != "NULL" {
+		if !equalFold(nullTok.value, "NULL") {
 			return nil, fmt.Errorf("gomdb: expected NULL after IS, got %q", nullTok.value)
 		}
 
@@ -632,19 +663,19 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}
 
 		return &SargNode{
-			Op: op,
+			Op:     op,
 			Parent: &SargNode{Value: MdbAny{S: colName}},
 		}, nil
 	}
 
 	// Handle function call: strptime('...','...')
-	if upper == "STRPTIME" || nextTok.typ == tokLParen {
+	if equalFold(nextTok.value, "STRPTIME") || nextTok.typ == tokLParen {
 		// Skip: treat strptime() calls specially
 		// strptime('date','format') → returned as a string value
 		var value MdbAny
 		var valType int
 
-		if upper == "STRPTIME" {
+		if equalFold(nextTok.value, "STRPTIME") {
 			p.next() // STRPTIME
 			p.next() // (
 			dateStr := p.next().value
@@ -681,12 +712,8 @@ func (p *parser) parseComparison() (*SargNode, error) {
 
 		// Now we need the comparison operator — look ahead
 		opTok := p.peek()
-		opUpper := strings.ToUpper(opTok.value)
-		op := map[string]int{
-			"=": OpEqual, "<": OpLT, ">": OpGT,
-			"<=": OpLTEQ, ">=": OpGTEQ, "<>": OpNEQ,
-		}[opUpper]
-		if op == 0 {
+		op, known := comparisonOp(opTok.value)
+		if !known {
 			op = OpEqual
 		} else {
 			p.next()
@@ -701,13 +728,7 @@ func (p *parser) parseComparison() (*SargNode, error) {
 	}
 
 	// Binary comparison operator
-	opUpper := strings.ToUpper(nextTok.value)
-	opMap := map[string]int{
-		"=": OpEqual, "<": OpLT, ">": OpGT,
-		"<=": OpLTEQ, ">=": OpGTEQ, "<>": OpNEQ,
-		"LIKE": OpLike, "ILIKE": OpILike,
-	}
-	op, known := opMap[opUpper]
+	op, known := comparisonOp(nextTok.value)
 	if !known {
 		return nil, fmt.Errorf("gomdb: unexpected token %q after column", nextTok.value)
 	}
@@ -739,18 +760,17 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}
 
 	case tokIdent:
-		upper := strings.ToUpper(valTok.value)
-		if upper == "NULL" {
+		if equalFold(valTok.value, "NULL") {
 			return &SargNode{
 				Op:     OpIsNull,
 				Parent: &SargNode{Value: MdbAny{S: colName}},
 			}, nil
 		}
 		// Could be TRUE/FALSE
-		if upper == "TRUE" {
+		if equalFold(valTok.value, "TRUE") {
 			value = MdbAny{I: 1}
 			valType = TypeInt
-		} else if upper == "FALSE" {
+		} else if equalFold(valTok.value, "FALSE") {
 			value = MdbAny{I: 0}
 			valType = TypeInt
 		} else {
@@ -779,8 +799,7 @@ func (p *parser) parseOrderBy() error {
 		if tok.typ == tokEOF || tok.typ == tokSemicolon {
 			break
 		}
-		upper := strings.ToUpper(tok.value)
-		if upper == "LIMIT" || upper == "WHERE" {
+		if equalFold(tok.value, "LIMIT") || equalFold(tok.value, "WHERE") {
 			break
 		}
 		p.next()
@@ -851,9 +870,6 @@ func (sql *SQL) mdbExecute() error {
 		return nil
 	}
 
-	// Read indices
-	mdb.ReadIndices(table)
-
 	// Rewind for reading
 	mdb.RewindTable(table)
 
@@ -888,6 +904,11 @@ func (sql *SQL) mdbExecute() error {
 func resolveSargColumns(node *SargNode, table *MdbTableDef) {
 	if node == nil {
 		return
+	}
+
+	if node.Op == OpILike {
+		node.ilikePattern = strings.ToLower(node.Value.S)
+		node.ilikePatternSet = true
 	}
 
 	if IsRelationalOp(node.Op) && node.Parent != nil {
@@ -978,48 +999,51 @@ func (sql *SQL) ColumnInfo() []Column {
 			Name: sqlCol.Name,
 		}
 
-		// Find the matching MdbColumn
-		for _, col := range sql.CurTable.Columns {
-			if equalFold(col.Name, sqlCol.Name) {
-				info[i].Type = col.ColType
-				info[i].DatabaseType = ColTypeName(col.ColType)
-				info[i].Size = int64(col.ColSize)
-				break
-			}
+		col := sql.boundColumn(i)
+		if col != nil {
+			info[i].Type = col.ColType
+			info[i].DatabaseType = ColTypeName(col.ColType)
+			info[i].Size = int64(col.ColSize)
 		}
 	}
 	return info
 }
 
-// Value returns the bound string value for a column.
+func (sql *SQL) boundColumn(idx int) *MdbColumn {
+	if idx < 0 || idx >= sql.NumColumns {
+		return nil
+	}
+	if idx < len(sql.BoundColumns) && sql.BoundColumns[idx] != nil {
+		return sql.BoundColumns[idx]
+	}
+	if sql.Mdb != nil {
+		return sql.Mdb.resultColumn(sql, idx)
+	}
+	return nil
+}
+
+// Value returns the compatibility string value for a column. Formatting is
+// deferred until this method is called.
 func (sql *SQL) Value(idx int) string {
 	if idx < 0 || idx >= sql.NumColumns {
 		return ""
 	}
-	// Read from the column's current BindPtr (which may have grown for large values)
-	sqlCol := sql.Columns[idx]
-	if sql.CurTable != nil {
-		for _, col := range sql.CurTable.Columns {
-			if equalFold(col.Name, sqlCol.Name) && col.BindPtr != nil {
-				val := col.BindPtr
-				for i, b := range val {
-					if b == 0 {
-						return string(val[:i])
-					}
-				}
-				return string(val)
+	if col := sql.boundColumn(idx); col != nil {
+		if col.BindPtr != nil {
+			boundLen := col.BindLen
+			if boundLen <= 0 || boundLen > len(col.BindPtr) {
+				boundLen = clen(col.BindPtr)
 			}
+			return trimNUL(string(col.BindPtr[:boundLen]))
 		}
+		if sql.Mdb == nil {
+			return ""
+		}
+		return trimNUL(sql.Mdb.columnValueToString(col))
 	}
-	// Fallback to stored bound values
 	if idx < len(sql.BoundValues) {
 		val := sql.BoundValues[idx]
-		for i, b := range val {
-			if b == 0 {
-				return string(val[:i])
-			}
-		}
-		return string(val)
+		return trimNUL(string(val))
 	}
 	return ""
 }
@@ -1029,11 +1053,8 @@ func (sql *SQL) IsNull(idx int) bool {
 	if sql.CurTable == nil || idx < 0 || idx >= sql.NumColumns {
 		return true
 	}
-	sqlCol := sql.Columns[idx]
-	for _, col := range sql.CurTable.Columns {
-		if equalFold(col.Name, sqlCol.Name) {
-			return col.CurValueIsNull
-		}
+	if col := sql.boundColumn(idx); col != nil {
+		return col.CurValueIsNull
 	}
 	return true
 }
@@ -1043,11 +1064,8 @@ func (sql *SQL) BinaryValue(idx int) []byte {
 	if sql.CurTable == nil || idx < 0 || idx >= sql.NumColumns {
 		return nil
 	}
-	sqlCol := sql.Columns[idx]
-	for _, col := range sql.CurTable.Columns {
-		if equalFold(col.Name, sqlCol.Name) {
-			return sql.Mdb.BinaryValue(col)
-		}
+	if col := sql.boundColumn(idx); col != nil {
+		return sql.Mdb.BinaryValue(col)
 	}
 	return nil
 }
@@ -1057,13 +1075,41 @@ func (sql *SQL) DateTimeValue(idx int) (time.Time, bool) {
 	if sql.CurTable == nil || idx < 0 || idx >= sql.NumColumns {
 		return time.Time{}, false
 	}
-	sqlCol := sql.Columns[idx]
-	for _, col := range sql.CurTable.Columns {
-		if equalFold(col.Name, sqlCol.Name) {
-			return sql.Mdb.DateTimeValue(col)
-		}
+	if col := sql.boundColumn(idx); col != nil {
+		return sql.Mdb.DateTimeValue(col)
 	}
 	return time.Time{}, false
+}
+
+// BoolValue returns a native Boolean result value.
+func (sql *SQL) BoolValue(idx int) (bool, bool) {
+	if sql.Mdb == nil {
+		return false, false
+	}
+	return sql.Mdb.BoolValue(sql.boundColumn(idx))
+}
+
+// Int64Value returns a native integral result value.
+func (sql *SQL) Int64Value(idx int) (int64, bool) {
+	if sql.Mdb == nil {
+		return 0, false
+	}
+	return sql.Mdb.Int64Value(sql.boundColumn(idx))
+}
+
+// Float64Value returns a native floating-point result value.
+func (sql *SQL) Float64Value(idx int) (float64, bool) {
+	if sql.Mdb == nil {
+		return 0, false
+	}
+	return sql.Mdb.Float64Value(sql.boundColumn(idx))
+}
+
+func trimNUL(s string) string {
+	if i := strings.IndexByte(s, 0); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // strptimeFormatToGo converts a C/Python strptime format to Go time layout.

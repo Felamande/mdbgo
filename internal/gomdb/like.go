@@ -16,46 +16,40 @@ func LikeCmp(s, r string) bool {
 // ILikeCmp tests whether string s matches the SQL LIKE pattern r,
 // case-insensitively using Unicode case folding.
 func ILikeCmp(s, r string) bool {
-	s1 := strings.ToLower(s)
-	r1 := strings.ToLower(r)
-	return likeCmp(s1, r1)
+	return iLikeCmpFolded(s, strings.ToLower(r))
+}
+
+func iLikeCmpFolded(s, foldedPattern string) bool {
+	return likeCmp(strings.ToLower(s), foldedPattern)
 }
 
 func likeCmp(s, r string) bool {
-	if len(r) == 0 {
-		return len(s) == 0
-	}
+	si, ri := 0, 0
+	star := -1
+	starMatch := 0
 
-	switch r[0] {
-	case '_':
-		// Match exactly one character
-		if len(s) == 0 {
-			return false
+	for si < len(s) {
+		if ri < len(r) && (r[ri] == '_' || r[ri] == s[si]) {
+			si++
+			ri++
+			continue
 		}
-		return likeCmp(s[1:], r[1:])
-
-	case '%':
-		// Match any number of characters, including zero
-		// Try matching at each position in s, including the end
-		for i := 0; i <= len(s); i++ {
-			if likeCmp(s[i:], r[1:]) {
-				return true
-			}
+		if ri < len(r) && r[ri] == '%' {
+			star = ri
+			ri++
+			starMatch = si
+			continue
+		}
+		if star >= 0 {
+			starMatch++
+			si = starMatch
+			ri = star + 1
+			continue
 		}
 		return false
-
-	default:
-		// Match literal characters up to the next wildcard
-		i := 0
-		for i < len(r) && r[i] != '_' && r[i] != '%' {
-			i++
-		}
-		if len(s) < i {
-			return false
-		}
-		if s[:i] != r[:i] {
-			return false
-		}
-		return likeCmp(s[i:], r[i:])
 	}
+	for ri < len(r) && r[ri] == '%' {
+		ri++
+	}
+	return ri == len(r)
 }

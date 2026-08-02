@@ -4,13 +4,13 @@ import "fmt"
 
 // MdbTableDef represents a table definition in an MDB database.
 type MdbTableDef struct {
-	Entry    *CatalogEntry
-	Name     string
+	Entry *CatalogEntry
+	Name  string
 
-	NumCols     int
-	Columns     []*MdbColumn
-	NumRows     int
-	NumVarCols  int
+	NumCols    int
+	Columns    []*MdbColumn
+	NumRows    int
+	NumVarCols int
 
 	NumIdxs     int
 	NumRealIdxs int
@@ -26,12 +26,12 @@ type MdbTableDef struct {
 	NoSkipDel int
 
 	// Usage maps
-	MapBasePg    uint32
-	MapSz        int
-	UsageMap     []byte
+	MapBasePg     uint32
+	MapSz         int
+	UsageMap      []byte
 	FreemapBasePg uint32
-	FreemapSz    int
-	FreeUsageMap []byte
+	FreemapSz     int
+	FreeUsageMap  []byte
 
 	// Sarg tree (WHERE clause)
 	SargTree *SargNode
@@ -47,42 +47,43 @@ type MdbTableDef struct {
 	TempTablePages [][]byte
 
 	// Pre-allocated field buffer for row cracking (reused across rows)
-	fieldsBuf []MdbField
+	fieldsBuf     []MdbField
+	varOffsetsBuf []int
 
 	Props *Properties
 }
 
 // MdbIndex represents an index on a table.
 type MdbIndex struct {
-	IndexNum  int
-	Name      string
-	IndexType int
-	FirstPg   uint32
-	NumRows   int
-	NumKeys   int
-	KeyColNum  [MaxIdxCols]int    // 1-based column numbers
-	KeyColOrder [MaxIdxCols]int   // Asc or Desc
-	Flags     int
-	Table     *MdbTableDef
+	IndexNum    int
+	Name        string
+	IndexType   int
+	FirstPg     uint32
+	NumRows     int
+	NumKeys     int
+	KeyColNum   [MaxIdxCols]int // 1-based column numbers
+	KeyColOrder [MaxIdxCols]int // Asc or Desc
+	Flags       int
+	Table       *MdbTableDef
 }
 
 // IndexChain tracks state while walking an index's B-tree.
 type IndexChain struct {
-	CurDepth     int
+	CurDepth      int
 	LastLeafFound uint32
-	CleanUpMode  int
-	Pages        [10]*MdbIndexPage
+	CleanUpMode   int
+	Pages         [10]*MdbIndexPage
 }
 
 // MdbIndexPage holds state for a single index page.
 type MdbIndexPage struct {
-	Pg        uint32
-	Offset    int
-	StartPos  int
-	Len       int
-	RC        int
+	Pg         uint32
+	Offset     int
+	StartPos   int
+	Len        int
+	RC         int
 	CacheValue [256]byte
-	IdxStarts [2000]int
+	IdxStarts  [2000]int
 }
 
 // MdbField represents a parsed field value from a row.

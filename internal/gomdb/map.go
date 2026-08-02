@@ -2,7 +2,6 @@ package gomdb
 
 import (
 	"errors"
-	"fmt"
 )
 
 // errNoMorePages is a sentinel returned when no data pages exist for a table.
@@ -13,19 +12,43 @@ var errNoMorePages = errors.New("no more data pages")
 func (mdb *MdbHandle) ReadNextDpg(table *MdbTableDef) error {
 	entry := table.Entry
 
-	// Try fast path using usage map
-	nextPg := mapFindNext(mdb, table.UsageMap, table.MapSz, int(table.CurPhysPg))
-	if nextPg > 0 && nextPg != int(table.CurPhysPg) {
+	// Use the allocation map until it reaches a normal EOF. A negative result,
+	// an unreadable candidate, or a page that belongs to another table marks a
+	// broken/incomplete map and enables the compatibility fallback below.
+	mapBroken := false
+	for {
+		nextPg := mapFindNext(mdb, table.UsageMap, table.MapSz, int(table.CurPhysPg))
+		if nextPg == 0 || nextPg == int(table.CurPhysPg) {
+			if !mapBroken {
+				// A non-empty table with no first map hit has an incomplete
+				// usage map (seen in a few damaged/legacy files). Recover once
+				// with the compatibility scan, but never rescan after a normal
+				// page-by-page EOF.
+				if nextPg == 0 && table.CurPhysPg == 0 && table.NumRows > 0 {
+					mapBroken = true
+					break
+				}
+				return errNoMorePages
+			}
+			break
+		}
+		if nextPg < 0 {
+			mapBroken = true
+			break
+		}
 		if err := mdb.readPage(uint32(nextPg)); err != nil {
-			return fmt.Errorf("gomdb: error reading page %d: %w", nextPg, err)
+			mapBroken = true
+			break
 		}
 		table.CurPhysPg = uint32(nextPg)
 		if mdb.pgBuf[0] == PageData && GetInt32(mdb.pgBuf[:], 4) == int(entry.TablePg) {
 			return nil
 		}
+		mapBroken = true
 	}
 
-	// Fall back to brute force scan (handles empty/broken usage maps)
+	// Fall back to brute force only for a map that proved unusable. Scanning
+	// after a normal map EOF turns every completed query into a scan to file EOF.
 	for {
 		table.CurPhysPg++
 		if err := mdb.readPage(table.CurPhysPg); err != nil {
@@ -40,8 +63,8 @@ func (mdb *MdbHandle) ReadNextDpg(table *MdbTableDef) error {
 // mapFindNext finds the next allocated page from a usage map.
 // Returns the page number, 0 if none found, -1 on error.
 func mapFindNext(mdb *MdbHandle, usageMap []byte, mapSz int, startPg int) int {
-	if mapSz < 5 {
-		return 0
+	if mapSz < 1 || mapSz > len(usageMap) {
+		return -1
 	}
 
 	mapType := usageMap[0]
@@ -56,8 +79,11 @@ func mapFindNext(mdb *MdbHandle, usageMap []byte, mapSz int, startPg int) int {
 
 // mapFindNext0 handles type-0 usage maps (inline bitmaps).
 func mapFindNext0(usageMap []byte, mapSz int, startPg int) int {
+	if mapSz < 5 || mapSz > len(usageMap) {
+		return -1
+	}
 	pgnum := GetInt32(usageMap, 1)
-	usageBitmap := usageMap[5:]
+	usageBitmap := usageMap[5:mapSz]
 	usageBitLen := (mapSz - 5) * 8
 
 	i := 0
@@ -74,6 +100,9 @@ func mapFindNext0(usageMap []byte, mapSz int, startPg int) int {
 
 // mapFindNext1 handles type-1 usage maps (extended bitmaps).
 func mapFindNext1(mdb *MdbHandle, usageMap []byte, mapSz int, startPg int) int {
+	if mapSz < 5 || mapSz > len(usageMap) {
+		return -1
+	}
 	usageBitLen := (mdb.fmt.PgSize - 4) * 8
 	maxMapPgs := (mapSz - 1) / 4
 
