@@ -10,7 +10,7 @@ import "strings"
 //
 // Returns true if s matches the pattern.
 func LikeCmp(s, r string) bool {
-	return likeCmp(s, r)
+	return likeCmpBytes([]byte(s), []byte(r))
 }
 
 // ILikeCmp tests whether string s matches the SQL LIKE pattern r,
@@ -20,10 +20,12 @@ func ILikeCmp(s, r string) bool {
 }
 
 func iLikeCmpFolded(s, foldedPattern string) bool {
-	return likeCmp(strings.ToLower(s), foldedPattern)
+	return likeCmpBytes([]byte(strings.ToLower(s)), []byte(foldedPattern))
 }
 
-func likeCmp(s, r string) bool {
+// likeCmpBytes is the LIKE matcher over byte slices; UTF-8 bytes are
+// compared as-is, preserving the historical byte-oriented semantics.
+func likeCmpBytes(s, r []byte) bool {
 	si, ri := 0, 0
 	star := -1
 	starMatch := 0

@@ -909,6 +909,11 @@ func resolveSargColumns(node *SargNode, table *MdbTableDef) {
 	if node.Op == OpILike {
 		node.ilikePattern = strings.ToLower(node.Value.S)
 		node.ilikePatternSet = true
+		node.patternBytes = []byte(node.ilikePattern)
+	} else if IsRelationalOp(node.Op) && node.ValType == TypeText {
+		// Precompute the byte form of string comparison patterns once per
+		// query so per-row sarg evaluation never allocates.
+		node.patternBytes = []byte(node.Value.S)
 	}
 
 	if IsRelationalOp(node.Op) && node.Parent != nil {

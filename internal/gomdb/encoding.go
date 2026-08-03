@@ -5,6 +5,24 @@ import (
 	"unicode/utf8"
 )
 
+// unicodeFastPath reports whether src is a Jet4 fully-compressed ASCII string,
+// i.e. a 0xFF 0xFE prefix followed by bytes that are all non-zero and below
+// RuneSelf. Such text decodes to the body itself, so callers can copy it
+// directly (or string() it with a single allocation) instead of running the
+// per-byte decode loop.
+func unicodeFastPath(src []byte, isJet4 bool) ([]byte, bool) {
+	if !isJet4 || len(src) < 2 || src[0] != 0xff || src[1] != 0xfe {
+		return nil, false
+	}
+	body := src[2:]
+	for _, b := range body {
+		if b == 0 || b >= utf8.RuneSelf {
+			return nil, false
+		}
+	}
+	return body, true
+}
+
 // decompressUnicode decompresses an Access "Unicode Compressed" string.
 // Access uses a run-length-like compression where:
 // - A 0x00 byte toggles between compressed and uncompressed mode
@@ -69,10 +87,23 @@ func appendUTF16Unit(dst []byte, pendingHigh *uint16, unit uint16) []byte {
 
 func appendUTF16LE(dst, src []byte) []byte {
 	var pendingHigh uint16
-	for len(src) >= 2 {
-		unit := uint16(src[0]) | uint16(src[1])<<8
+	i := 0
+	for i+1 < len(src) {
+		// Bulk-copy runs of ASCII units (high byte 0x00, low byte below
+		// RuneSelf); those cannot interact with a pending surrogate either.
+		if src[i+1] == 0 && src[i] < utf8.RuneSelf && pendingHigh == 0 {
+			j := i + 2
+			for j+1 < len(src) && src[j+1] == 0 && src[j] < utf8.RuneSelf {
+				j += 2
+			}
+			for ; i < j; i += 2 {
+				dst = append(dst, src[i])
+			}
+			continue
+		}
+		unit := uint16(src[i]) | uint16(src[i+1])<<8
 		dst = appendUTF16Unit(dst, &pendingHigh, unit)
-		src = src[2:]
+		i += 2
 	}
 	if pendingHigh != 0 {
 		dst = utf8.AppendRune(dst, utf8.RuneError)
@@ -83,15 +114,33 @@ func appendUTF16LE(dst, src []byte) []byte {
 func appendCompressedUnicode(dst, src []byte) []byte {
 	compressed := true
 	var pendingHigh uint16
-	for i := 0; i < len(src); {
+	i := 0
+	for i < len(src) {
 		if src[i] == 0 {
 			compressed = !compressed
 			i++
 			continue
 		}
 		if compressed {
-			dst = appendUTF16Unit(dst, &pendingHigh, uint16(src[i]))
-			i++
+			// Process the run of bytes up to the next mode toggle at once.
+			j := i
+			for j < len(src) && src[j] != 0 {
+				j++
+			}
+			// Compressed bytes decode to U+00xx, which can never complete a
+			// pending surrogate pair, so bulk-copy the ASCII prefix of the
+			// run (each byte is its own UTF-8 character).
+			if pendingHigh == 0 {
+				k := i
+				for k < j && src[k] < utf8.RuneSelf {
+					k++
+				}
+				dst = append(dst, src[i:k]...)
+				i = k
+			}
+			for ; i < j; i++ {
+				dst = appendUTF16Unit(dst, &pendingHigh, uint16(src[i]))
+			}
 			continue
 		}
 		if i+1 >= len(src) {
@@ -121,6 +170,9 @@ func appendLatin1UTF8(dst, src []byte) []byte {
 func appendUnicodeUTF8(dst, src []byte, isJet4 bool) []byte {
 	if !isJet4 {
 		return appendLatin1UTF8(dst, src)
+	}
+	if body, ok := unicodeFastPath(src, isJet4); ok {
+		return append(dst, body...)
 	}
 	if len(src) >= 2 && src[0] == 0xff && src[1] == 0xfe {
 		return appendCompressedUnicode(dst, src[2:])
@@ -168,6 +220,11 @@ func UnicodeToUTF8(src []byte, isJet4 bool) string {
 func (mdb *MdbHandle) unicodeToUTF8(src []byte) string {
 	if len(src) == 0 {
 		return ""
+	}
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		// The UTF-8 form of a fully-compressed ASCII string is the body
+		// itself; string() copies it directly, skipping the scratch buffer.
+		return string(body)
 	}
 	mdb.unicodeBuf = appendUnicodeUTF8(mdb.unicodeBuf[:0], src, mdb.IsJet4())
 	return string(mdb.unicodeBuf)

@@ -149,12 +149,3 @@ func crackRow3Offsets(mdb *MdbHandle, rowStart, rowEnd, bitmaskSz, rowVarCols in
 	}
 }
 
-// findField finds the field for a given column number in the fields array.
-func findField(colNum int, fields []MdbField) int {
-	for i, f := range fields {
-		if f.ColNum == colNum {
-			return i
-		}
-	}
-	return -1
-}

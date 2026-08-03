@@ -1,5 +1,10 @@
 package gomdb
 
+import (
+	"bytes"
+	"strings"
+)
+
 // SargNode is a node in the search argument tree (WHERE clause).
 type SargNode struct {
 	Op       int
@@ -13,6 +18,7 @@ type SargNode struct {
 
 	ilikePattern    string
 	ilikePatternSet bool
+	patternBytes    []byte // precomputed []byte form of Value.S for string sargs
 }
 
 // TestSargs evaluates the sarg tree against the provided fields.
@@ -37,12 +43,13 @@ func testSargNode(mdb *MdbHandle, node *SargNode, fields []MdbField) int {
 			return node.Value.I
 		}
 
-		elem := findField(col.ColNum, fields)
-		if elem < 0 {
+		// CrackRow assigns fields[i].ColNum == i, so the field for a column
+		// is found by index rather than a linear scan.
+		if col.ColNum < 0 || col.ColNum >= len(fields) {
 			return 0
 		}
 
-		if testSarg(mdb, col, node, &fields[elem]) {
+		if testSarg(mdb, col, node, &fields[col.ColNum]) {
 			return 1
 		}
 		return 0
@@ -144,8 +151,7 @@ func testSarg(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField) b
 		if field.IsNull {
 			return false
 		}
-		val := mdb.unicodeToUTF8(field.Value)
-		return testString(node, val)
+		return mdb.testSargString(node, field.Value)
 
 	case TypeMemo, TypeRepID:
 		if field.IsNull {
@@ -175,6 +181,55 @@ func (mdb *MdbHandle) valueFromField(col *MdbColumn, field *MdbField) string {
 	tmpCol.CurValueLen = field.Siz
 	tmpCol.CurValueIsNull = field.IsNull
 	return mdb.colToString(&tmpCol, field)
+}
+
+// testSargString evaluates a string sarg against raw field bytes without
+// allocating a string per row: the field is decoded into the handle's
+// reusable buffer and compared byte-wise (UTF-8 comparison is
+// order-preserving, so results match the legacy string comparisons).
+func (mdb *MdbHandle) testSargString(node *SargNode, src []byte) bool {
+	if node.Op == OpILike {
+		// ILIKE folds the decoded text with Unicode case folding, which
+		// needs a real string; it is not on the hot path.
+		return testString(node, mdb.unicodeToUTF8(src))
+	}
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return testStringBytes(node, body)
+	}
+	buf := appendUnicodeUTF8(mdb.unicodeBuf[:0], src, mdb.IsJet4())
+	mdb.unicodeBuf = buf
+	return testStringBytes(node, buf)
+}
+
+// testStringBytes performs string comparison for sargs over byte slices.
+func testStringBytes(node *SargNode, s []byte) bool {
+	p := node.patternBytes
+	if p == nil {
+		p = []byte(node.Value.S)
+	}
+	switch node.Op {
+	case OpLike:
+		return likeCmpBytes(s, p)
+	case OpILike:
+		if node.ilikePatternSet {
+			// patternBytes holds the pre-folded pattern for ILIKE
+			return likeCmpBytes(s, node.patternBytes)
+		}
+		return likeCmpBytes(s, []byte(strings.ToLower(node.Value.S)))
+	case OpEqual:
+		return bytes.Equal(s, p)
+	case OpNEQ:
+		return !bytes.Equal(s, p)
+	case OpGT:
+		return bytes.Compare(s, p) > 0
+	case OpLT:
+		return bytes.Compare(s, p) < 0
+	case OpGTEQ:
+		return bytes.Compare(s, p) >= 0
+	case OpLTEQ:
+		return bytes.Compare(s, p) <= 0
+	}
+	return false
 }
 
 // testString performs string comparison for sargs.

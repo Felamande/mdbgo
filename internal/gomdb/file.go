@@ -8,9 +8,17 @@ import (
 	"os"
 )
 
+// MaxInMemoryFileSize is the largest database that is fully loaded into
+// memory at open time. MDB scans issue one ReadAt per page (and memos follow
+// random page pointers), so loading the file once eliminates hundreds of
+// thousands of syscalls per full-table scan. Larger files fall back to
+// on-demand page reads.
+var MaxInMemoryFileSize int64 = 128 << 20
+
 // MdbFile represents an open MDB database file.
 type MdbFile struct {
 	stream     io.ReaderAt
+	data       []byte // non-nil when the whole file is resident in memory
 	size       int64
 	jetVersion int
 	dbKey      uint32
@@ -89,6 +97,15 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 	mdb.f = &MdbFile{
 		stream: r,
 		size:   size,
+	}
+
+	// Load the file into memory when small enough. This turns every page
+	// read (including random memo-page lookups) into a memcpy. Fall back to
+	// stream reads on any I/O error; correctness does not depend on it.
+	if size > 0 && size <= MaxInMemoryFileSize {
+		if data := readAllExact(r, size); data != nil {
+			mdb.f.data = data
+		}
 	}
 
 	// Read page 0 (database definition page)
@@ -192,9 +209,19 @@ func (mdb *MdbHandle) readPageInto(dst []byte, pg uint32) error {
 	}
 
 	buf := dst[:pgSize]
-	n, err := mdb.f.stream.ReadAt(buf, offset)
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("gomdb: error reading page %d: %w", pg, err)
+	var n int
+	if mdb.f.data != nil {
+		end := offset + int64(pgSize)
+		if end > mdb.f.size {
+			end = mdb.f.size
+		}
+		n = copy(buf, mdb.f.data[offset:end])
+	} else {
+		var err error
+		n, err = mdb.f.stream.ReadAt(buf, offset)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("gomdb: error reading page %d: %w", pg, err)
+		}
 	}
 	clear(buf[n:])
 
@@ -214,6 +241,34 @@ func (mdb *MdbHandle) Close() error {
 		}
 	}
 	return nil
+}
+
+// readAllExact reads exactly size bytes from r into a single allocation.
+// Returns nil if the read cannot be completed, in which case callers fall
+// back to per-page stream reads.
+func readAllExact(r io.ReaderAt, size int64) []byte {
+	if size <= 0 || size > MaxInMemoryFileSize {
+		return nil
+	}
+	data := make([]byte, size)
+	n := 0
+	for n < len(data) {
+		m, err := r.ReadAt(data[n:], int64(n))
+		n += m
+		if err != nil {
+			if err == io.EOF && n == len(data) {
+				break
+			}
+			return nil
+		}
+		if m == 0 {
+			return nil
+		}
+	}
+	if n != len(data) {
+		return nil
+	}
+	return data
 }
 
 // readerSize attempts to determine the size of an io.ReaderAt.
