@@ -483,6 +483,10 @@ func (fs *fastScan) worker() {
 		fields:    make([]MdbField, len(fs.table.Columns)),
 		layouts:   buildCrackLayouts(fs.table),
 		valueMask: valueMask,
+		needValue: make([]bool, len(fs.table.Columns)),
+	}
+	for i := range s.needValue {
+		s.needValue[i] = needsValue(valueMask, i)
 	}
 	for _, i := range fs.crackCols {
 		if s.layouts[i].isFixed {
