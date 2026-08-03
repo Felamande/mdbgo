@@ -52,23 +52,15 @@ func canFastScan(mdb *MdbHandle, sql *SQL) bool {
 
 type fastRow struct {
 	page   []byte
-	fields []rowField
+	start  int32
+	size   int32
 	values []any
 	valid  bool
-}
-
-// rowField is the compact per-cell descriptor retained for legacy getters
-// (Value, Int64Value, ...). The full MdbField is only kept in worker scratch.
-type rowField struct {
-	start  int32
-	siz    int32
-	isNull bool
 }
 
 type fastBatch struct {
 	rows        []fastRow
 	values      []any
-	fields      []rowField
 	n           int
 	eof         bool
 	err         error
@@ -83,7 +75,6 @@ type fastBatch struct {
 type batchArena struct {
 	rows   []fastRow
 	values []any
-	fields []rowField
 }
 
 var batchArenaPool sync.Pool
@@ -93,15 +84,12 @@ func newFastBatch(nRows, nBound int) *fastBatch {
 	if a, ok := batchArenaPool.Get().(*batchArena); ok && cap(a.rows) >= nRows && cap(a.values) >= nRows*nBound {
 		b.rows = a.rows[:nRows]
 		b.values = a.values[:nRows*nBound]
-		b.fields = a.fields[:nRows*nBound]
 	} else {
 		b.rows = make([]fastRow, nRows)
 		b.values = make([]any, nRows*nBound)
-		b.fields = make([]rowField, nRows*nBound)
 	}
 	for i := range b.rows {
 		b.rows[i].values = b.values[i*nBound : (i+1)*nBound]
-		b.rows[i].fields = b.fields[i*nBound : (i+1)*nBound]
 	}
 	return b
 }
@@ -110,10 +98,9 @@ func (b *fastBatch) recycle() {
 	if b.rows == nil {
 		return
 	}
-	batchArenaPool.Put(&batchArena{rows: b.rows, values: b.values, fields: b.fields})
+	batchArenaPool.Put(&batchArena{rows: b.rows, values: b.values})
 	b.rows = nil
 	b.values = nil
-	b.fields = nil
 }
 
 func (b *fastBatch) markReady() {
@@ -131,12 +118,13 @@ type fastTask struct {
 }
 
 type fastScan struct {
-	mdb       *MdbHandle
-	sql       *SQL
-	table     *MdbTableDef
-	bound     []*MdbColumn
-	crackCols []int
-	sargMask  []bool
+	mdb         *MdbHandle
+	sql         *SQL
+	table       *MdbTableDef
+	bound       []*MdbColumn
+	crackCols   []int
+	sargMask    []bool
+	noValueMask []bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -154,6 +142,9 @@ type fastScan struct {
 	curIdx       int
 	curRow       *fastRow
 	valueScratch *decodeScratch
+	crackedFor   *fastRow
+	cracked      []MdbField
+	boundCols    []int
 	done         bool
 	err          error
 }
@@ -182,6 +173,12 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 	}
 	fs.sargMask = buildSargMask(sql)
 	fs.crackCols = buildCrackCols(sql, fs.sargMask)
+	fs.noValueMask = make([]bool, len(sql.CurTable.Columns))
+	fs.boundCols = make([]int, len(sql.BoundColumns))
+	for i, col := range sql.BoundColumns {
+		fs.boundCols[i] = col.ColNum
+	}
+	fs.valueScratch.layouts = buildCrackLayouts(sql.CurTable)
 	for i := 0; i < fastInFlight; i++ {
 		fs.slots <- struct{}{}
 	}
@@ -466,6 +463,8 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 		r := &t.batch.rows[t.slot+k]
 		r.valid = false
 		r.page = page
+		r.start = 0
+		r.size = 0
 
 		rowStart, rowSize, err := fs.mdb.findRowIn(page, t.firstRow+k)
 		if err != nil || rowSize == 0 {
@@ -475,6 +474,8 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 			continue
 		}
 		rowStart &= OffsetMask
+		r.start = int32(rowStart)
+		r.size = int32(rowSize)
 
 		fields, err := crackRowInto(fs.mdb, table, page, rowStart, rowSize, s, s.valueMask, fs.crackCols)
 		if err != nil {
@@ -485,7 +486,6 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 		}
 		for i, col := range bound {
 			f := &fields[col.ColNum]
-			r.fields[i] = rowField{start: int32(f.Start), siz: int32(f.Siz), isNull: f.IsNull}
 			r.values[i] = formatDriverValue(fs.mdb, col, page, f, s)
 		}
 		r.valid = true
@@ -600,11 +600,33 @@ func (fs *fastScan) nextRow() (bool, error) {
 		}
 		fs.sql.RowCount++
 		fs.curRow = r
+		fs.crackedFor = nil
 		return true, nil
 	}
 }
 
-// --- Fast-mode legacy getters (descriptor-based, no shared column state) ---
+// --- Fast-mode legacy getters (lazy, no shared column state) ---
+
+// crackedFieldsFor returns the cracked fields of the current row's bound
+// columns, computed on demand for the legacy getters. Fast scans otherwise
+// never materialize per-cell fields.
+func (fs *fastScan) crackedFieldsFor(r *fastRow) []MdbField {
+	if fs.crackedFor == r && fs.cracked != nil {
+		return fs.cracked
+	}
+	fs.crackedFor = r
+	if r == nil {
+		fs.cracked = nil
+		return nil
+	}
+	fields, err := crackRowInto(fs.mdb, fs.table, r.page, int(r.start), int(r.size), fs.valueScratch, fs.noValueMask, fs.boundCols)
+	if err != nil {
+		fs.cracked = nil
+		return nil
+	}
+	fs.cracked = fields
+	return fields
+}
 
 func (fs *fastScan) driverValue(i int) any {
 	if fs.curRow == nil || i < 0 || i >= len(fs.bound) {
@@ -631,17 +653,20 @@ func (fs *fastScan) value(i int) string {
 	if col == nil {
 		return ""
 	}
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
+		return ""
+	}
+	field := &fields[col.ColNum]
 	// Boolean compatibility strings mirror columnValueToString: a NULL bool
 	// renders as "0", not as the empty string.
 	if col.ColType == TypeBool {
-		if fs.curRow.fields[i].isNull {
+		if field.IsNull {
 			return "0"
 		}
 		return "1"
 	}
-	rf := &fs.curRow.fields[i]
-	field := MdbField{Start: int(rf.start), Siz: int(rf.siz), IsNull: rf.isNull}
-	return trimNUL(colToStringIn(fs.mdb, col, &field, fs.curRow.page, fs.valueScratch))
+	return trimNUL(colToStringIn(fs.mdb, col, field, fs.curRow.page, fs.valueScratch))
 }
 
 func (fs *fastScan) isNull(i int) bool {
@@ -651,7 +676,11 @@ func (fs *fastScan) isNull(i int) bool {
 	if fs.bound[i].ColType == TypeBool {
 		return false
 	}
-	return fs.curRow.fields[i].isNull
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
+		return true
+	}
+	return fields[fs.bound[i].ColNum].IsNull
 }
 
 func (fs *fastScan) boolValue(i int) (bool, bool) {
@@ -662,7 +691,11 @@ func (fs *fastScan) boolValue(i int) (bool, bool) {
 	if col.ColType != TypeBool {
 		return false, false
 	}
-	return !fs.curRow.fields[i].isNull, true
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
+		return false, false
+	}
+	return !fields[col.ColNum].IsNull, true
 }
 
 func (fs *fastScan) int64Value(i int) (int64, bool) {
@@ -670,33 +703,37 @@ func (fs *fastScan) int64Value(i int) (int64, bool) {
 		return 0, false
 	}
 	col := fs.bound[i]
-	f := &fs.curRow.fields[i]
-	if col.ColType != TypeBool && f.isNull {
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
+		return 0, false
+	}
+	f := &fields[col.ColNum]
+	if col.ColType != TypeBool && f.IsNull {
 		return 0, false
 	}
 	page := fs.curRow.page
 	switch col.ColType {
 	case TypeBool:
 		v := 0
-		if !f.isNull {
+		if !f.IsNull {
 			v = 1
 		}
 		return int64(v), true
 	case TypeByte:
-		if f.siz < 1 {
+		if f.Siz < 1 {
 			return 0, false
 		}
-		return int64(page[f.start]), true
+		return int64(page[f.Start]), true
 	case TypeInt:
-		if f.siz < 2 {
+		if f.Siz < 2 {
 			return 0, false
 		}
-		return int64(GetInt16(page, int(f.start))), true
+		return int64(GetInt16(page, f.Start)), true
 	case TypeLongInt, TypeComplex:
-		if f.siz < 4 {
+		if f.Siz < 4 {
 			return 0, false
 		}
-		return int64(GetInt32(page, int(f.start))), true
+		return int64(GetInt32(page, f.Start)), true
 	}
 	return 0, false
 }
@@ -706,27 +743,31 @@ func (fs *fastScan) float64Value(i int) (float64, bool) {
 		return 0, false
 	}
 	col := fs.bound[i]
-	f := &fs.curRow.fields[i]
-	if f.isNull {
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
+		return 0, false
+	}
+	f := &fields[col.ColNum]
+	if f.IsNull {
 		return 0, false
 	}
 	page := fs.curRow.page
 	switch col.ColType {
 	case TypeFloat:
-		if f.siz < 4 {
+		if f.Siz < 4 {
 			return 0, false
 		}
-		return compatibilityFloat64(float64(GetSingle(page, int(f.start))), 8, 32), true
+		return compatibilityFloat64(float64(GetSingle(page, f.Start)), 8, 32), true
 	case TypeDouble:
-		if f.siz < 8 {
+		if f.Siz < 8 {
 			return 0, false
 		}
-		return compatibilityFloat64(GetDouble(page, int(f.start)), 16, 64), true
+		return compatibilityFloat64(GetDouble(page, f.Start), 16, 64), true
 	case TypeMoney:
-		if f.siz < 8 {
+		if f.Siz < 8 {
 			return 0, false
 		}
-		return float64(int64(binary.LittleEndian.Uint64(page[int(f.start):]))) / 10000, true
+		return float64(int64(binary.LittleEndian.Uint64(page[f.Start:]))) / 10000, true
 	}
 	return 0, false
 }
@@ -736,11 +777,15 @@ func (fs *fastScan) dateTimeValue(i int) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	col := fs.bound[i]
-	f := &fs.curRow.fields[i]
-	if col.ColType != TypeDateTime || f.isNull {
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
 		return time.Time{}, false
 	}
-	return DateToTime(GetDouble(fs.curRow.page, int(f.start))), true
+	f := &fields[col.ColNum]
+	if col.ColType != TypeDateTime || f.IsNull {
+		return time.Time{}, false
+	}
+	return DateToTime(GetDouble(fs.curRow.page, f.Start)), true
 }
 
 func (fs *fastScan) binaryValue(i int) []byte {
@@ -748,11 +793,15 @@ func (fs *fastScan) binaryValue(i int) []byte {
 		return nil
 	}
 	col := fs.bound[i]
-	f := &fs.curRow.fields[i]
-	if col.ColType != TypeBinary || f.isNull || f.siz <= 0 {
+	fields := fs.crackedFieldsFor(fs.curRow)
+	if fields == nil {
 		return nil
 	}
-	data := make([]byte, f.siz)
-	copy(data, fs.curRow.page[int(f.start):int(f.start)+int(f.siz)])
+	f := &fields[col.ColNum]
+	if col.ColType != TypeBinary || f.IsNull || f.Siz <= 0 {
+		return nil
+	}
+	data := make([]byte, f.Siz)
+	copy(data, fs.curRow.page[f.Start:f.Start+f.Siz])
 	return data
 }
