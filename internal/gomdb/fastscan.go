@@ -25,7 +25,7 @@ var fastScanEnabled = true // test hook to force the synchronous path
 const (
 	fastScanMinRows  = 2048
 	fastScanMinCells = 20000
-	maxFastWorkers   = 8
+	maxFastWorkers   = 10
 	fastBatchRows    = 256
 	fastTaskRows     = 128
 	fastInFlight     = 8
@@ -105,10 +105,11 @@ type fastTask struct {
 }
 
 type fastScan struct {
-	mdb   *MdbHandle
-	sql   *SQL
-	table *MdbTableDef
-	bound []*MdbColumn
+	mdb       *MdbHandle
+	sql       *SQL
+	table     *MdbTableDef
+	bound     []*MdbColumn
+	crackCols []int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -152,6 +153,7 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 		slots:        make(chan struct{}, fastInFlight),
 		valueScratch: &decodeScratch{fields: make([]MdbField, len(sql.CurTable.Columns))},
 	}
+	fs.crackCols = buildCrackCols(sql)
 	for i := 0; i < fastInFlight; i++ {
 		fs.slots <- struct{}{}
 	}
@@ -165,6 +167,40 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 		}()
 	}
 	return fs
+}
+
+// buildCrackCols returns the set of column indices that row cracking must
+// populate: every bound result column plus every column referenced by the
+// sarg tree. Projection queries then avoid cracking unselected columns.
+func buildCrackCols(sql *SQL) []int {
+	needed := make([]bool, len(sql.CurTable.Columns))
+	mark := func(col *MdbColumn) {
+		if col != nil && col.ColNum >= 0 && col.ColNum < len(needed) {
+			needed[col.ColNum] = true
+		}
+	}
+	for _, col := range sql.BoundColumns {
+		mark(col)
+	}
+	if sql.CurTable.SargTree != nil {
+		var walk func(n *SargNode)
+		walk = func(n *SargNode) {
+			if n == nil {
+				return
+			}
+			mark(n.Col)
+			walk(n.Left)
+			walk(n.Right)
+		}
+		walk(sql.CurTable.SargTree)
+	}
+	cols := make([]int, 0, len(needed))
+	for i, ok := range needed {
+		if ok {
+			cols = append(cols, i)
+		}
+	}
+	return cols
 }
 
 func (fs *fastScan) close() {
@@ -374,7 +410,7 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 		}
 		rowStart &= OffsetMask
 
-		fields, err := crackRowInto(fs.mdb, table, page, rowStart, rowSize, s, table.SargTree != nil)
+		fields, err := crackRowInto(fs.mdb, table, page, rowStart, rowSize, s, table.SargTree != nil, fs.crackCols)
 		if err != nil {
 			continue
 		}
