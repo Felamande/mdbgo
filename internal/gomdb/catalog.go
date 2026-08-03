@@ -2,7 +2,6 @@ package gomdb
 
 import (
 	"fmt"
-	"strconv"
 )
 
 // ReadCatalog reads the MSysObjects table and populates the catalog.
@@ -31,17 +30,27 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 		return fmt.Errorf("gomdb: unable to read MSysObjects columns: %w", err)
 	}
 
-	// Bind columns: Id, Name, Type, Flags, LvProp
-	idIdx := mdb.bindColumnByName(table, "Id")
-	nameIdx := mdb.bindColumnByName(table, "Name")
-	typeIdx := mdb.bindColumnByName(table, "Type")
-	flagsIdx := mdb.bindColumnByName(table, "Flags")
-	lvPropIdx := mdb.bindColumnByName(table, "LvProp")
-
+	findCol := func(name string) int {
+		for i, col := range table.Columns {
+			if equalFold(col.Name, name) {
+				return i
+			}
+		}
+		return -1
+	}
+	idIdx := findCol("Id")
+	nameIdx := findCol("Name")
+	typeIdx := findCol("Type")
+	flagsIdx := findCol("Flags")
+	lvPropIdx := findCol("LvProp")
 	if idIdx < 0 || nameIdx < 0 || typeIdx < 0 || flagsIdx < 0 || lvPropIdx < 0 {
-		return fmt.Errorf("gomdb: unable to bind all required MSysObjects columns")
+		return fmt.Errorf("gomdb: unable to find all required MSysObjects columns")
 	}
 
+	idCol := table.Columns[idIdx]
+	nameCol := table.Columns[nameIdx]
+	typeCol := table.Columns[typeIdx]
+	flagsCol := table.Columns[flagsIdx]
 	lvPropCol := table.Columns[lvPropIdx]
 
 	mdb.RewindTable(table)
@@ -55,24 +64,20 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 			break
 		}
 
-		objTypeStr := mdb.GetBoundValue(table, typeIdx)
-		objFlagsStr := mdb.GetBoundValue(table, flagsIdx)
-		objIDStr := mdb.GetBoundValue(table, idIdx)
-		objName := mdb.GetBoundValue(table, nameIdx)
+		typ, _ := mdb.Int64Value(typeCol)
+		flags, _ := mdb.Int64Value(flagsCol)
+		objName := mdb.columnValueToString(nameCol)
 
-		typ, _ := strconv.Atoi(objTypeStr)
-		flags, _ := strconv.Atoi(objFlagsStr)
-
-		if objType == ObjAny || typ == objType {
+		if objType == ObjAny || int(typ) == objType {
 			entry := &CatalogEntry{
 				Mdb:        mdb,
 				ObjectName: objName,
-				ObjectType: typ & 0x7F,
-				Flags:      flags,
+				ObjectType: int(typ) & 0x7F,
+				Flags:      int(flags),
 			}
 
 			// Parse table page from Id (low 24 bits)
-			if id, err := strconv.ParseInt(objIDStr, 10, 64); err == nil {
+			if id, ok := mdb.Int64Value(idCol); ok {
 				entry.TablePg = uint32(id & 0x00FFFFFF)
 			}
 
