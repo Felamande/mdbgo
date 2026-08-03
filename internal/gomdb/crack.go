@@ -11,6 +11,7 @@ type decodeScratch struct {
 	varOffsets []int
 	unicode    []byte
 	layouts    []crackLayout
+	valueMask  []bool
 }
 
 // crackLayout is the per-column data needed to crack rows, packed into a
@@ -53,7 +54,7 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 	}
 	s := &decodeScratch{fields: table.fieldsBuf, varOffsets: table.varOffsetsBuf}
 	s.layouts = table.crackLayouts
-	fields, err := crackRowInto(mdb, table, mdb.pgBuf, rowStart, rowSize, s, true, nil)
+	fields, err := crackRowInto(mdb, table, mdb.pgBuf, rowStart, rowSize, s, nil, nil)
 	table.fieldsBuf = s.fields
 	table.varOffsetsBuf = s.varOffsets
 	return fields, err
@@ -62,10 +63,10 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 // crackRowInto parses a row from an explicit page buffer using caller-owned
 // scratch. This is the shared implementation used by the synchronous path
 // (page = mdb.pgBuf, scratch = table buffers) and by fast-scan workers.
-// When needValues is false (fast scans without sargs), per-field Value slices
-// are skipped; only Start/Siz/IsNull are populated. When cols is non-nil,
-// only those column indices are cracked (projection-aware fast scans).
-func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, rowSize int, s *decodeScratch, needValues bool, cols []int) ([]MdbField, error) {
+// valueMask marks the columns that need per-field Value slices (sarg-referenced
+// columns in fast scans); nil means every column needs them. When cols is
+// non-nil, only those column indices are cracked (projection-aware fast scans).
+func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, rowSize int, s *decodeScratch, valueMask []bool, cols []int) ([]MdbField, error) {
 	rowEnd := rowStart + rowSize - 1
 
 	// Read row column count
@@ -146,7 +147,7 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 				}
 				lp = &tmp
 			}
-			crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needValues)
+			crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
 		}
 		return fields, nil
 	}
@@ -157,7 +158,7 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 		if layouts != nil {
 			lp = &layouts[i]
 		}
-		crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, fixedColsFound, varColOffsets, colCountSize, nullMask, i, needValues)
+		crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, fixedColsFound, varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
 		if lp != nil {
 			if lp.isFixed {
 				fixedColsFound++
@@ -174,7 +175,7 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 // number of fixed columns preceding this one, which determines whether the
 // row actually stored a value for it. lp may be nil for the synchronous
 // fallback, in which case the column's live attributes are used.
-func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, rowStart, rowSize, rowFixedCols, fixedCount int, varColOffsets []int, colCountSize int, nullMask []byte, colNum int, needValues bool) {
+func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, rowStart, rowSize, rowFixedCols, fixedCount int, varColOffsets []int, colCountSize int, nullMask []byte, colNum int, needValue bool) {
 	var isFixed bool
 	var byteNum int
 	var bitNum byte
@@ -199,7 +200,7 @@ func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, 
 		colSize = col.ColSize
 	}
 
-	if needValues {
+	if needValue {
 		f.Value = nil
 		f.ColNum = colNum
 		f.IsFixed = isFixed
@@ -215,14 +216,14 @@ func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, 
 		colStart += colCountSize
 		f.Start = rowStart + colStart
 		f.Siz = colSize
-		if needValues && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+		if needValue && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
 			f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
 		}
 	} else if !isFixed && varNum < len(varColOffsets)-1 {
 		colStart = varColOffsets[varNum]
 		f.Start = rowStart + colStart
 		f.Siz = varColOffsets[varNum+1] - colStart
-		if needValues && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+		if needValue && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
 			f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
 		}
 	} else {
@@ -237,6 +238,10 @@ func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, 
 		f.Start = rowStart
 		f.Siz = 0
 	}
+}
+
+func needsValue(mask []bool, i int) bool {
+	return mask == nil || (i < len(mask) && mask[i])
 }
 
 func fixedColsBefore(cols []*MdbColumn, i int) int {

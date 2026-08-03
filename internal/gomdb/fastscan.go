@@ -110,6 +110,7 @@ type fastScan struct {
 	table     *MdbTableDef
 	bound     []*MdbColumn
 	crackCols []int
+	sargMask  []bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -153,7 +154,8 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 		slots:        make(chan struct{}, fastInFlight),
 		valueScratch: &decodeScratch{fields: make([]MdbField, len(sql.CurTable.Columns))},
 	}
-	fs.crackCols = buildCrackCols(sql)
+	fs.sargMask = buildSargMask(sql)
+	fs.crackCols = buildCrackCols(sql, fs.sargMask)
 	for i := 0; i < fastInFlight; i++ {
 		fs.slots <- struct{}{}
 	}
@@ -169,10 +171,34 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 	return fs
 }
 
+// buildSargMask returns a per-column mask of columns referenced by the sarg
+// tree (nil when there is no WHERE clause). Those columns need per-field
+// Value slices during cracking.
+func buildSargMask(sql *SQL) []bool {
+	tree := sql.CurTable.SargTree
+	if tree == nil {
+		return nil
+	}
+	mask := make([]bool, len(sql.CurTable.Columns))
+	var walk func(n *SargNode)
+	walk = func(n *SargNode) {
+		if n == nil {
+			return
+		}
+		if n.Col != nil && n.Col.ColNum >= 0 && n.Col.ColNum < len(mask) {
+			mask[n.Col.ColNum] = true
+		}
+		walk(n.Left)
+		walk(n.Right)
+	}
+	walk(tree)
+	return mask
+}
+
 // buildCrackCols returns the set of column indices that row cracking must
 // populate: every bound result column plus every column referenced by the
 // sarg tree. Projection queries then avoid cracking unselected columns.
-func buildCrackCols(sql *SQL) []int {
+func buildCrackCols(sql *SQL, sargMask []bool) []int {
 	needed := make([]bool, len(sql.CurTable.Columns))
 	mark := func(col *MdbColumn) {
 		if col != nil && col.ColNum >= 0 && col.ColNum < len(needed) {
@@ -182,17 +208,10 @@ func buildCrackCols(sql *SQL) []int {
 	for _, col := range sql.BoundColumns {
 		mark(col)
 	}
-	if sql.CurTable.SargTree != nil {
-		var walk func(n *SargNode)
-		walk = func(n *SargNode) {
-			if n == nil {
-				return
-			}
-			mark(n.Col)
-			walk(n.Left)
-			walk(n.Right)
+	for i, ok := range sargMask {
+		if ok {
+			needed[i] = true
 		}
-		walk(sql.CurTable.SargTree)
 	}
 	cols := make([]int, 0, len(needed))
 	for i, ok := range needed {
@@ -380,8 +399,9 @@ func (fs *fastScan) enqueueErr(err error, prev <-chan struct{}) {
 
 func (fs *fastScan) worker() {
 	s := &decodeScratch{
-		fields:  make([]MdbField, len(fs.table.Columns)),
-		layouts: buildCrackLayouts(fs.table),
+		fields:    make([]MdbField, len(fs.table.Columns)),
+		layouts:   buildCrackLayouts(fs.table),
+		valueMask: fs.sargMask,
 	}
 	for t := range fs.tasks {
 		fs.processTask(t, s)
@@ -410,7 +430,7 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 		}
 		rowStart &= OffsetMask
 
-		fields, err := crackRowInto(fs.mdb, table, page, rowStart, rowSize, s, table.SargTree != nil, fs.crackCols)
+		fields, err := crackRowInto(fs.mdb, table, page, rowStart, rowSize, s, s.valueMask, fs.crackCols)
 		if err != nil {
 			continue
 		}
