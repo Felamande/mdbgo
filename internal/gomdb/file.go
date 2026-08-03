@@ -18,6 +18,7 @@ var MaxInMemoryFileSize int64 = 128 << 20
 // MdbFile represents an open MDB database file.
 type MdbFile struct {
 	stream     io.ReaderAt
+	path       string
 	data       []byte // non-nil when the whole file is resident in memory
 	size       int64
 	jetVersion int
@@ -100,6 +101,7 @@ func openMDBFromReader(filename string, r io.ReaderAt) (*MdbHandle, error) {
 
 	mdb.f = &MdbFile{
 		stream: r,
+		path:   filename,
 		size:   size,
 	}
 

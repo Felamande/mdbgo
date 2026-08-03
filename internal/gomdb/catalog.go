@@ -2,7 +2,32 @@ package gomdb
 
 import (
 	"fmt"
+	"os"
+	"sync"
 )
+
+// cachedCatalogEntry is a parsed MSysObjects row without handle-specific
+// back-references, so the result can be shared across connections.
+type cachedCatalogEntry struct {
+	name    string
+	rawType int
+	tablePg uint32
+	flags   int
+	props   []*Properties
+}
+
+type catalogFileCache struct {
+	size    int64
+	mtime   int64
+	entries []cachedCatalogEntry
+}
+
+var (
+	catalogCacheMu sync.Mutex
+	catalogCache   = make(map[string]*catalogFileCache)
+)
+
+const maxCatalogCacheEntries = 64
 
 // ReadCatalog reads the MSysObjects table and populates the catalog.
 // If objType is ObjAny, all object types are included.
@@ -12,6 +37,72 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 		return nil
 	}
 
+	entries, err := mdb.catalogEntries()
+	if err != nil {
+		return err
+	}
+	for i := range entries {
+		e := &entries[i]
+		if objType == ObjAny || e.rawType == objType {
+			mdb.Catalog = append(mdb.Catalog, &CatalogEntry{
+				Mdb:        mdb,
+				ObjectName: e.name,
+				ObjectType: e.rawType & 0x7F,
+				TablePg:    e.tablePg,
+				Flags:      e.flags,
+				Props:      e.props,
+			})
+		}
+	}
+	mdb.numCatalog = len(mdb.Catalog)
+	return nil
+}
+
+// catalogEntries returns the parsed MSysObjects rows, reusing a per-file cache
+// when the file is unchanged. The returned slice must not be modified.
+func (mdb *MdbHandle) catalogEntries() ([]cachedCatalogEntry, error) {
+	if path, size, mtime, ok := mdb.catalogFileInfo(); ok {
+		catalogCacheMu.Lock()
+		if e, hit := catalogCache[path]; hit && e.size == size && e.mtime == mtime {
+			entries := e.entries
+			catalogCacheMu.Unlock()
+			return entries, nil
+		}
+		catalogCacheMu.Unlock()
+
+		entries, err := mdb.buildCatalogEntries()
+		if err != nil {
+			return nil, err
+		}
+		catalogCacheMu.Lock()
+		if len(catalogCache) >= maxCatalogCacheEntries {
+			clear(catalogCache)
+		}
+		catalogCache[path] = &catalogFileCache{size: size, mtime: mtime, entries: entries}
+		catalogCacheMu.Unlock()
+		return entries, nil
+	}
+	return mdb.buildCatalogEntries()
+}
+
+func (mdb *MdbHandle) catalogFileInfo() (path string, size, mtime int64, ok bool) {
+	if mdb.f == nil || mdb.f.path == "" {
+		return "", 0, 0, false
+	}
+	f, isFile := mdb.f.stream.(*os.File)
+	if !isFile {
+		return "", 0, 0, false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return "", 0, 0, false
+	}
+	return mdb.f.path, fi.Size(), fi.ModTime().UnixNano(), true
+}
+
+// buildCatalogEntries reads MSysObjects and parses every row without the
+// per-handle filtering, so the result can be cached per file.
+func (mdb *MdbHandle) buildCatalogEntries() ([]cachedCatalogEntry, error) {
 	// Create a dummy catalog entry for MSysObjects (page 2)
 	dummyEntry := &CatalogEntry{
 		Mdb:        mdb,
@@ -22,12 +113,12 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 
 	table, err := mdb.ReadTable(dummyEntry)
 	if err != nil {
-		return fmt.Errorf("gomdb: unable to read MSysObjects table: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to read MSysObjects table: %w", err)
 	}
 	defer mdb.FreeTableDef(table)
 
 	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("gomdb: unable to read MSysObjects columns: %w", err)
+		return nil, fmt.Errorf("gomdb: unable to read MSysObjects columns: %w", err)
 	}
 
 	findCol := func(name string) int {
@@ -44,7 +135,7 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 	flagsIdx := findCol("Flags")
 	lvPropIdx := findCol("LvProp")
 	if idIdx < 0 || nameIdx < 0 || typeIdx < 0 || flagsIdx < 0 || lvPropIdx < 0 {
-		return fmt.Errorf("gomdb: unable to find all required MSysObjects columns")
+		return nil, fmt.Errorf("gomdb: unable to find all required MSysObjects columns")
 	}
 
 	idCol := table.Columns[idIdx]
@@ -55,10 +146,11 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 
 	mdb.RewindTable(table)
 
+	var entries []cachedCatalogEntry
 	for {
 		hasRow, err := mdb.FetchRow(table)
 		if err != nil {
-			return fmt.Errorf("gomdb: error reading MSysObjects: %w", err)
+			return nil, fmt.Errorf("gomdb: error reading MSysObjects: %w", err)
 		}
 		if !hasRow {
 			break
@@ -68,33 +160,29 @@ func (mdb *MdbHandle) ReadCatalog(objType int) error {
 		flags, _ := mdb.Int64Value(flagsCol)
 		objName := mdb.columnValueToString(nameCol)
 
-		if objType == ObjAny || int(typ) == objType {
-			entry := &CatalogEntry{
-				Mdb:        mdb,
-				ObjectName: objName,
-				ObjectType: int(typ) & 0x7F,
-				Flags:      int(flags),
-			}
-
-			// Parse table page from Id (low 24 bits)
-			if id, ok := mdb.Int64Value(idCol); ok {
-				entry.TablePg = uint32(id & 0x00FFFFFF)
-			}
-
-			// Read LvProp (KKD data) if present
-			if !lvPropCol.CurValueIsNull {
-				kkd, kkdLen, err := mdb.OleReadFull(lvPropCol, nil)
-				if err == nil && kkdLen > 0 {
-					entry.Props = kkdToProps(mdb, kkd, kkdLen)
-				}
-			}
-
-			mdb.numCatalog++
-			mdb.Catalog = append(mdb.Catalog, entry)
+		entry := cachedCatalogEntry{
+			name:    objName,
+			rawType: int(typ),
+			flags:   int(flags),
 		}
+
+		// Parse table page from Id (low 24 bits)
+		if id, ok := mdb.Int64Value(idCol); ok {
+			entry.tablePg = uint32(id & 0x00FFFFFF)
+		}
+
+		// Read LvProp (KKD data) if present
+		if !lvPropCol.CurValueIsNull {
+			kkd, kkdLen, err := mdb.OleReadFull(lvPropCol, nil)
+			if err == nil && kkdLen > 0 {
+				entry.props = kkdToProps(mdb, kkd, kkdLen)
+			}
+		}
+
+		entries = append(entries, entry)
 	}
 
-	return nil
+	return entries, nil
 }
 
 // GetCatalogEntryByName finds a catalog entry by name (case-insensitive).
