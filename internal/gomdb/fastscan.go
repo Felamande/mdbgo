@@ -147,6 +147,21 @@ type fastScan struct {
 	boundCols    []int
 	done         bool
 	err          error
+
+	boolCols  []fmtCol
+	intCols   []fmtCol
+	floatCols []fmtCol
+	dtCols    []fmtCol
+	binCols   []fmtCol
+	textCols  []fmtCol
+	otherCols []fmtCol
+}
+
+// fmtCol maps a result-column index to its table column index for the
+// type-grouped formatting loops.
+type fmtCol struct {
+	res int
+	col int
 }
 
 func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
@@ -179,6 +194,25 @@ func newFastScan(mdb *MdbHandle, sql *SQL) *fastScan {
 		fs.boundCols[i] = col.ColNum
 	}
 	fs.valueScratch.layouts = buildCrackLayouts(sql.CurTable)
+	for res, col := range sql.BoundColumns {
+		fc := fmtCol{res: res, col: col.ColNum}
+		switch col.ColType {
+		case TypeBool:
+			fs.boolCols = append(fs.boolCols, fc)
+		case TypeByte, TypeInt, TypeLongInt, TypeComplex:
+			fs.intCols = append(fs.intCols, fc)
+		case TypeFloat, TypeDouble, TypeMoney:
+			fs.floatCols = append(fs.floatCols, fc)
+		case TypeDateTime:
+			fs.dtCols = append(fs.dtCols, fc)
+		case TypeBinary:
+			fs.binCols = append(fs.binCols, fc)
+		case TypeText:
+			fs.textCols = append(fs.textCols, fc)
+		default:
+			fs.otherCols = append(fs.otherCols, fc)
+		}
+	}
 	for i := 0; i < fastInFlight; i++ {
 		fs.slots <- struct{}{}
 	}
@@ -469,7 +503,6 @@ func (fs *fastScan) worker() {
 func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 	page := t.page
 	table := fs.table
-	bound := fs.bound
 	for k := 0; k < t.n; k++ {
 		r := &t.batch.rows[t.slot+k]
 		r.valid = false
@@ -495,11 +528,34 @@ func (fs *fastScan) processTask(t fastTask, s *decodeScratch) {
 		if table.SargTree != nil && !testSargsIn(fs.mdb, table.SargTree, fields, page, s) {
 			continue
 		}
-		for i, col := range bound {
-			f := &fields[col.ColNum]
-			r.values[i] = formatDriverValue(fs.mdb, col, page, f, s)
-		}
+		fs.formatRow(r.values, fields, page, s)
 		r.valid = true
+	}
+}
+
+// formatRow fills a row's values using type-grouped loops so the hot path has
+// no per-cell type switch.
+func (fs *fastScan) formatRow(values []any, fields []MdbField, page []byte, s *decodeScratch) {
+	for _, fc := range fs.boolCols {
+		values[fc.res] = formatBoolValue(&fields[fc.col])
+	}
+	for _, fc := range fs.intCols {
+		values[fc.res] = formatIntValue(fs.mdb, fs.bound[fc.res], page, &fields[fc.col], s)
+	}
+	for _, fc := range fs.floatCols {
+		values[fc.res] = formatFloatValue(fs.mdb, fs.bound[fc.res], page, &fields[fc.col], s)
+	}
+	for _, fc := range fs.dtCols {
+		values[fc.res] = formatDateTimeValue(page, &fields[fc.col])
+	}
+	for _, fc := range fs.binCols {
+		values[fc.res] = formatBinaryValue(fs.mdb, fs.bound[fc.res], page, &fields[fc.col], s)
+	}
+	for _, fc := range fs.textCols {
+		values[fc.res] = formatTextValue(fs.mdb, fs.bound[fc.res], page, &fields[fc.col], s)
+	}
+	for _, fc := range fs.otherCols {
+		values[fc.res] = formatOtherValue(fs.mdb, fs.bound[fc.res], page, &fields[fc.col], s)
 	}
 }
 
@@ -507,19 +563,17 @@ func testSargsIn(mdb *MdbHandle, node *SargNode, fields []MdbField, page []byte,
 	return testSargNodeScratch(mdb, node, fields, page, s) != 0
 }
 
-// formatDriverValue produces the native driver.Value for one column of one
-// row, mirroring the synchronous Rows.value/DriverValue semantics.
-func formatDriverValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
-	if col.ColType != TypeBool && f.IsNull {
+// formatBoolValue mirrors the synchronous bool value semantics: bool columns
+// are never NULL and render as true when the physical field is non-null.
+func formatBoolValue(f *MdbField) any {
+	return !f.IsNull
+}
+
+func formatIntValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
+	if f.IsNull {
 		return nil
 	}
 	switch col.ColType {
-	case TypeBool:
-		v := 0
-		if !f.IsNull {
-			v = 1
-		}
-		return v != 0
 	case TypeByte:
 		if f.Siz >= 1 {
 			return int64(page[f.Start])
@@ -532,6 +586,15 @@ func formatDriverValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField,
 		if f.Siz >= 4 {
 			return int64(GetInt32(page, f.Start))
 		}
+	}
+	return trimNUL(colToStringIn(mdb, col, f, page, s))
+}
+
+func formatFloatValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
+	if f.IsNull {
+		return nil
+	}
+	switch col.ColType {
 	case TypeFloat:
 		if f.Siz >= 4 {
 			return compatibilityFloat64(float64(GetSingle(page, f.Start)), 8, 32)
@@ -544,24 +607,45 @@ func formatDriverValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField,
 		if f.Siz >= 8 {
 			return float64(int64(binary.LittleEndian.Uint64(page[f.Start:]))) / 10000
 		}
-	case TypeDateTime:
-		return DateToTime(GetDouble(page, f.Start))
-	case TypeBinary:
-		if f.Siz > 0 {
-			data := make([]byte, f.Siz)
-			copy(data, page[f.Start:f.Start+f.Siz])
-			return data
-		}
-	case TypeText:
-		// Fast-path text is pure ASCII and therefore NUL-free; skip the
-		// trimNUL pass that the generic string path performs.
-		src := page[f.Start : f.Start+f.Siz]
-		if _, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
-			return string(src[2:])
-		}
-		return trimNUL(unicodeScratch(src, mdb.IsJet4(), s))
-	default:
-		return trimNUL(colToStringIn(mdb, col, f, page, s))
+	}
+	return trimNUL(colToStringIn(mdb, col, f, page, s))
+}
+
+func formatDateTimeValue(page []byte, f *MdbField) any {
+	if f.IsNull {
+		return nil
+	}
+	return DateToTime(GetDouble(page, f.Start))
+}
+
+func formatBinaryValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
+	if f.IsNull {
+		return nil
+	}
+	if f.Siz > 0 {
+		data := make([]byte, f.Siz)
+		copy(data, page[f.Start:f.Start+f.Siz])
+		return data
+	}
+	return trimNUL(colToStringIn(mdb, col, f, page, s))
+}
+
+func formatTextValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
+	if f.IsNull {
+		return nil
+	}
+	// Fast-path text is pure ASCII and therefore NUL-free; skip the trimNUL
+	// pass that the generic string path performs.
+	src := page[f.Start : f.Start+f.Siz]
+	if _, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return string(src[2:])
+	}
+	return trimNUL(unicodeScratch(src, mdb.IsJet4(), s))
+}
+
+func formatOtherValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {
+	if f.IsNull {
+		return nil
 	}
 	return trimNUL(colToStringIn(mdb, col, f, page, s))
 }
