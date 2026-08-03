@@ -198,3 +198,35 @@ func BenchmarkColumnTypes(b *testing.B) {
 		db.Close()
 	}
 }
+
+// BenchmarkQueryReusedConn measures repeated queries on a single live
+// connection, where prepared plans are cached and re-executed.
+func BenchmarkQueryReusedConn(b *testing.B) {
+	db, err := sql.Open(DriverName, "../../testdata/people.mdb")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		rows, err := db.Query("SELECT id, name, active FROM people WHERE id > 0")
+		if err != nil {
+			b.Fatal(err)
+		}
+		for rows.Next() {
+			var id int
+			var name string
+			var active bool
+			if err := rows.Scan(&id, &name, &active); err != nil {
+				b.Fatal(err)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

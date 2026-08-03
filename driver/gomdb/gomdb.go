@@ -19,6 +19,8 @@ import (
 
 const DriverName = "gomdb"
 
+const maxCachedPlans = 16
+
 func init() {
 	sql.Register(DriverName, &Driver{})
 }
@@ -37,8 +39,9 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 // --- Conn ---
 
 type Conn struct {
-	path string
-	mdb  *backend.MdbHandle
+	path  string
+	mdb   *backend.MdbHandle
+	plans map[string]*backend.Plan
 }
 
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
@@ -49,6 +52,7 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 }
 
 func (c *Conn) Close() error {
+	c.plans = nil
 	if c.mdb != nil {
 		c.mdb.Close()
 		c.mdb = nil
@@ -68,7 +72,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	if err != nil {
 		return nil, err
 	}
-	h, err := c.openQuery(expanded)
+	h, plan, err := c.openQuery(expanded)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +81,7 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	for i := range info {
 		cols[i] = info[i].Name
 	}
-	return &Rows{h: h, cols: cols, info: info}, nil
+	return &Rows{h: h, cols: cols, info: info, conn: c, planKey: expanded, plan: plan}, nil
 }
 
 func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -88,23 +92,49 @@ func (c *Conn) Ping(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	h, err := c.openQuery("LIST TABLES")
+	h, _, err := c.openQuery("LIST TABLES")
 	if err != nil {
 		return err
 	}
 	return h.Close()
 }
 
-// openQuery lazily opens the MDB file (if not already open) and executes a query.
-func (c *Conn) openQuery(query string) (*backend.Query, error) {
+// openQuery lazily opens the MDB file (if not already open) and executes a
+// query, reusing a cached plan when one is available. The returned plan is
+// non-nil only for cache hits; fresh queries return nil and the Rows close
+// path captures a new plan for future executions.
+func (c *Conn) openQuery(query string) (*backend.Query, *backend.Plan, error) {
 	if c.mdb == nil {
 		mdb, err := backend.OpenMDB(c.path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		c.mdb = mdb
 	}
-	return backend.OpenQueryOnHandle(c.mdb, query)
+	if c.plans == nil {
+		c.plans = make(map[string]*backend.Plan)
+	}
+	if p, ok := c.plans[query]; ok {
+		if q, err := p.Execute(c.mdb); err == nil {
+			return q, p, nil
+		}
+		delete(c.plans, query)
+	}
+	q, err := backend.OpenQueryOnHandle(c.mdb, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	return q, nil, nil
+}
+
+func (c *Conn) cachePlan(key string, p *backend.Plan) {
+	if c.plans == nil {
+		c.plans = make(map[string]*backend.Plan)
+	}
+	if len(c.plans) >= maxCachedPlans {
+		clear(c.plans)
+	}
+	c.plans[key] = p
 }
 
 var _ driver.Driver = (*Driver)(nil)
@@ -150,10 +180,13 @@ var _ driver.StmtExecContext = (*Stmt)(nil)
 // --- Rows ---
 
 type Rows struct {
-	h      *backend.Query
-	cols   []string
-	info   []backend.Column
-	closed bool
+	h       *backend.Query
+	cols    []string
+	info    []backend.Column
+	conn    *Conn
+	planKey string
+	plan    *backend.Plan
+	closed  bool
 }
 
 func (r *Rows) Columns() []string {
@@ -167,7 +200,17 @@ func (r *Rows) Close() error {
 		return nil
 	}
 	r.closed = true
-	return r.h.Close()
+	if r.h != nil {
+		// Fresh queries become reusable plans; cache hits just release the
+		// plan through the normal Query close path.
+		if r.plan == nil && r.conn != nil {
+			if p := r.h.CapturePlan(); p != nil {
+				r.conn.cachePlan(r.planKey, p)
+			}
+		}
+		return r.h.Close()
+	}
+	return nil
 }
 
 func (r *Rows) Next(dest []driver.Value) error {

@@ -16,6 +16,7 @@ type Query struct {
 	sql     *SQL
 	ownsMdb bool
 	fast    *fastScan
+	plan    *Plan
 }
 
 // OpenQuery opens an MDB database and executes a SQL query.
@@ -69,18 +70,49 @@ func openQueryOnMdb(mdb *MdbHandle, query string) (*Query, error) {
 // If the Query owns its MdbHandle (created via OpenQuery), the handle is closed.
 // If created via OpenQueryOnHandle, the MdbHandle is left open.
 func (q *Query) Close() error {
-	if q.sql == nil {
+	if q.sql == nil && q.plan == nil {
 		return nil
 	}
 	if q.fast != nil {
 		q.fast.close()
 		q.fast = nil
 	}
-	if q.ownsMdb && q.sql.Mdb != nil {
+	if q.plan != nil {
+		q.plan.release()
+		q.plan = nil
+	}
+	if q.ownsMdb && q.sql != nil && q.sql.Mdb != nil {
 		q.sql.Mdb.Close()
 	}
 	q.sql = nil
 	return nil
+}
+
+// CapturePlan detaches the executed SQL from this query into a reusable Plan
+// (stopping any running fast scan first). Returns nil for queries that cannot
+// be reused, such as temp-table results. Callers should cache the returned
+// plan and still call Close on the query.
+func (q *Query) CapturePlan() *Plan {
+	if q.sql == nil || q.sql.CurTable == nil || q.sql.CurTable.IsTempTable {
+		return nil
+	}
+	mdb := q.sql.Mdb
+	if mdb == nil || mdb.f == nil {
+		return nil
+	}
+	if q.fast != nil {
+		q.fast.close()
+		q.fast = nil
+	}
+	p := &Plan{
+		sql:      q.sql,
+		sargTree: q.sql.CurTable.SargTree,
+		size:     mdb.f.size,
+		mtime:    mdb.f.mtime,
+	}
+	q.plan = p
+	q.sql = nil
+	return p
 }
 
 // Next advances to the next row in the result set.

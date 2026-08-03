@@ -123,6 +123,52 @@ func TestInterpolateQuery(t *testing.T) {
 	}
 }
 
+func TestPreparedQueryReuse(t *testing.T) {
+	db, err := sql.Open(DriverName, "../../testdata/people.mdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmt, err := db.Prepare("SELECT id, name FROM people WHERE id = ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+
+	run := func() []string {
+		rows, err := stmt.Query(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var id int
+			var name string
+			if err := rows.Scan(&id, &name); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, name)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	first := run()
+	second := run()
+	if len(first) == 0 || len(first) != len(second) {
+		t.Fatalf("prepared results differ: %v vs %v", first, second)
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Fatalf("prepared row %d differs: %q vs %q", i, first[i], second[i])
+		}
+	}
+}
+
 func TestCountPlaceholders(t *testing.T) {
 	query := `SELECT * FROM [what?] WHERE a = '?' AND b = "?" AND c = ? AND d = ?`
 	if got := countPlaceholders(query); got != 2 {
