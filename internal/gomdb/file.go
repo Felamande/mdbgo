@@ -19,6 +19,7 @@ var MaxInMemoryFileSize int64 = 128 << 20
 type MdbFile struct {
 	stream     io.ReaderAt
 	data       []byte // non-nil when the whole file is resident in memory
+	mapped     bool   // data is an mmap of the underlying file
 	size       int64
 	jetVersion int
 	dbKey      uint32
@@ -31,8 +32,10 @@ type MdbHandle struct {
 	f        *MdbFile
 	curPg    uint32
 	curPos   int
-	pgBuf    [PageSize]byte
-	altPgBuf [PageSize]byte
+	pgArr    [PageSize]byte // owned scratch backing for pgBuf
+	altPgArr [PageSize]byte // owned scratch backing for altPgBuf
+	pgBuf    []byte         // current page view (scratch, temp page, or file data)
+	altPgBuf []byte         // alternate page view (scratch or file data)
 	altPg    uint32
 	altValid bool
 	fmt      *MdbFormatConstants
@@ -85,6 +88,8 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 		Catalog:      make([]*CatalogEntry, 0),
 		props:        make(map[string]string),
 	}
+	mdb.pgBuf = mdb.pgArr[:]
+	mdb.altPgBuf = mdb.altPgArr[:]
 
 	// Bootstrap with Jet3 constants; will be corrected after reading page 0
 	mdb.fmt = &Jet3FormatConstants
@@ -103,8 +108,17 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 	// read (including random memo-page lookups) into a memcpy. Fall back to
 	// stream reads on any I/O error; correctness does not depend on it.
 	if size > 0 && size <= MaxInMemoryFileSize {
-		if data := readAllExact(r, size); data != nil {
+		var data []byte
+		var mapped bool
+		if f, ok := r.(*os.File); ok {
+			data, mapped = mapFileData(f, size)
+		}
+		if data == nil {
+			data = readAllExact(r, size)
+		}
+		if data != nil {
 			mdb.f.data = data
+			mdb.f.mapped = mapped
 		}
 	}
 
@@ -175,10 +189,12 @@ func (mdb *MdbHandle) readPage(pg uint32) error {
 		return nil // already loaded
 	}
 
-	if err := mdb.readPageInto(mdb.pgBuf[:], pg); err != nil {
+	view, err := mdb.readPageView(mdb.pgArr[:mdb.fmt.PgSize], pg)
+	if err != nil {
 		return err
 	}
 
+	mdb.pgBuf = view
 	mdb.curPg = pg
 	mdb.curPos = 0
 	return nil
@@ -190,12 +206,38 @@ func (mdb *MdbHandle) readAltPage(pg uint32) error {
 		return nil
 	}
 
-	if err := mdb.readPageInto(mdb.altPgBuf[:], pg); err != nil {
+	view, err := mdb.readPageView(mdb.altPgArr[:mdb.fmt.PgSize], pg)
+	if err != nil {
 		return err
 	}
+	mdb.altPgBuf = view
 	mdb.altPg = pg
 	mdb.altValid = true
 	return nil
+}
+
+// readPageView returns a view of page pg. For unencrypted databases that are
+// fully resident in memory, the view aliases the file data directly, avoiding
+// a per-page copy. For encrypted, streamed, or partial trailing pages, the
+// page is read into dst (which must be pgSize bytes of owned scratch).
+func (mdb *MdbHandle) readPageView(dst []byte, pg uint32) ([]byte, error) {
+	pgSize := mdb.fmt.PgSize
+	offset := int64(pg) * int64(pgSize)
+	if offset >= mdb.f.size {
+		return nil, fmt.Errorf("gomdb: page %d is beyond EOF (offset %d, size %d)", pg, offset, mdb.f.size)
+	}
+
+	if mdb.f.data != nil && mdb.f.dbKey == 0 && pg != 0 {
+		end := offset + int64(pgSize)
+		if end <= mdb.f.size {
+			return mdb.f.data[offset:end], nil
+		}
+	}
+
+	if err := mdb.readPageInto(dst, pg); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 // readPageInto reads and decrypts a page into dst. Keeping the disk I/O and
@@ -236,6 +278,10 @@ func (mdb *MdbHandle) readPageInto(dst []byte, pg uint32) error {
 // Close closes the MDB handle and releases resources.
 func (mdb *MdbHandle) Close() error {
 	if mdb.f != nil {
+		if mdb.f.mapped && mdb.f.data != nil {
+			unmapFileData(mdb.f.data)
+			mdb.f.data = nil
+		}
 		if closer, ok := mdb.f.stream.(io.Closer); ok {
 			return closer.Close()
 		}
@@ -428,17 +474,17 @@ func (mdb *MdbHandle) findPgRow(pgRow int) (buf []byte, offset int, length int, 
 	if err := mdb.readAltPage(pg); err != nil {
 		return nil, 0, 0, err
 	}
-	off, sz, err := mdb.findRowIn(mdb.altPgBuf[:], row)
+	off, sz, err := mdb.findRowIn(mdb.altPgBuf, row)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	off &= OffsetMask
-	return mdb.altPgBuf[:], off, sz, nil
+	return mdb.altPgBuf, off, sz, nil
 }
 
 // findRow locates a row within the current page and returns its offset and length.
 func (mdb *MdbHandle) findRow(row int) (start int, length int, err error) {
-	return mdb.findRowIn(mdb.pgBuf[:], row)
+	return mdb.findRowIn(mdb.pgBuf, row)
 }
 
 // findRowIn locates a row in buf without changing the handle's active page.

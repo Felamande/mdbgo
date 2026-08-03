@@ -72,7 +72,9 @@ func (mdb *MdbHandle) FetchRow(table *MdbTableDef) (bool, error) {
 					return false, nil
 				}
 			}
-			copy(mdb.pgBuf[:], pages[table.CurPgNum-1])
+			// Point directly at the temp page: rows live in per-page slices,
+			// so no copy is needed and CrackRow can view the page in place.
+			mdb.pgBuf = pages[table.CurPgNum-1]
 			mdb.curPg = 0 // invalidate: pgBuf no longer contains a real disk page
 		} else {
 			rows := GetInt16(mdb.pgBuf[:], mfmt.RowCountOffset)
@@ -233,6 +235,15 @@ func (mdb *MdbHandle) columnValueToString(col *MdbColumn) string {
 
 // colToString converts a column value to its string representation.
 func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
+	return colToStringIn(mdb, col, field, mdb.pgBuf, nil)
+}
+
+// colToStringIn converts a column value to its string representation using
+// an explicit row page. With scratch == nil it uses the handle's shared
+// buffers (synchronous path, including encrypted/streamed memo pages); with
+// scratch != nil it uses caller-owned buffers and pure resident-file memo
+// access, which is safe for fast-scan workers.
+func colToStringIn(mdb *MdbHandle, col *MdbColumn, field *MdbField, page []byte, s *decodeScratch) string {
 	if field.Siz == 0 || field.IsNull {
 		return ""
 	}
@@ -245,45 +256,51 @@ func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
 		return "0"
 
 	case TypeByte:
-		return strconv.FormatInt(int64(mdb.pgBuf[field.Start]), 10)
+		return strconv.FormatInt(int64(page[field.Start]), 10)
 
 	case TypeInt:
-		return strconv.FormatInt(int64(GetInt16(mdb.pgBuf[:], field.Start)), 10)
+		return strconv.FormatInt(int64(GetInt16(page, field.Start)), 10)
 
 	case TypeLongInt, TypeComplex:
-		return strconv.FormatInt(int64(GetInt32(mdb.pgBuf[:], field.Start)), 10)
+		return strconv.FormatInt(int64(GetInt32(page, field.Start)), 10)
 
 	case TypeFloat:
-		f := GetSingle(mdb.pgBuf[:], field.Start)
+		f := GetSingle(page, field.Start)
 		return strconv.FormatFloat(float64(f), 'g', 8, 32)
 
 	case TypeDouble:
-		d := GetDouble(mdb.pgBuf[:], field.Start)
+		d := GetDouble(page, field.Start)
 		return strconv.FormatFloat(d, 'g', 16, 64)
 
 	case TypeText:
-		return mdb.unicodeToUTF8(mdb.pgBuf[field.Start : field.Start+field.Siz])
+		if s != nil {
+			return unicodeScratch(page[field.Start:field.Start+field.Siz], mdb.IsJet4(), s)
+		}
+		return mdb.unicodeToUTF8(page[field.Start : field.Start+field.Siz])
 
 	case TypeDateTime:
-		return mdb.dateTimeToString(col)
+		return dateTimeToStringIn(page, field.Start)
 
 	case TypeMemo:
+		if s != nil {
+			return memoToStringIn(mdb, page, field.Start, field.Siz, s)
+		}
 		return mdb.memoToString(field.Start, field.Siz)
 
 	case TypeMoney:
-		return MoneyToString(mdb.pgBuf[:], field.Start)
+		return MoneyToString(page, field.Start)
 
 	case TypeRepID:
-		return uuidToString(mdb.pgBuf[:], field.Start)
+		return uuidToString(page, field.Start)
 
 	case TypeNumeric:
-		return NumericToString(mdb.pgBuf[:], field.Start, col.ColScale, col.ColPrec)
+		return NumericToString(page, field.Start, col.ColScale, col.ColPrec)
 
 	case TypeBinary:
 		if field.Siz < 0 {
 			return ""
 		}
-		return string(mdb.pgBuf[field.Start : field.Start+field.Siz])
+		return string(page[field.Start : field.Start+field.Siz])
 
 	case TypeOLE:
 		// The historical binder exposed the twelve-byte OLE header through
@@ -291,11 +308,92 @@ func (mdb *MdbHandle) colToString(col *MdbColumn, field *MdbField) string {
 		if field.Siz < MemoOverhead {
 			return ""
 		}
-		return string(mdb.pgBuf[field.Start : field.Start+MemoOverhead])
+		return string(page[field.Start : field.Start+MemoOverhead])
 
 	default:
 		return ""
 	}
+}
+
+func dateTimeToStringIn(page []byte, start int) string {
+	td := GetDouble(page, start)
+	t := DateToTime(td)
+	return t.Format("2006-01-02 15:04:05")
+}
+
+// memoPageView returns the row bytes for a pg_row reference directly from the
+// resident file data. Unlike findPgRow it does not touch the handle's shared
+// alternate-page buffer, so fast-scan workers can decode memos in parallel.
+func (mdb *MdbHandle) memoPageView(pgRow int) (page []byte, start, length int, ok bool) {
+	pg := uint32(pgRow >> 8)
+	row := pgRow & 0xff
+	if row > 1000 {
+		return nil, 0, 0, false
+	}
+	pgSize := mdb.fmt.PgSize
+	offset := int64(pg) * int64(pgSize)
+	if mdb.f.data == nil || mdb.f.dbKey != 0 || offset < 0 || offset+int64(pgSize) > mdb.f.size {
+		return nil, 0, 0, false
+	}
+	page = mdb.f.data[offset : offset+int64(pgSize)]
+	rco := mdb.fmt.RowCountOffset
+	start = GetInt16(page, rco+2+row*2)
+	next := pgSize
+	if row > 0 {
+		next = GetInt16(page, rco+row*2) & OffsetMask
+	}
+	start &= OffsetMask
+	if start >= pgSize || start > next || next > pgSize {
+		return nil, 0, 0, false
+	}
+	return page, start, next - start, true
+}
+
+// memoToStringIn decodes a memo field whose row lives in page. Content pages
+// are read directly from the resident file data (the fast-scan path), and the
+// UTF-8 output is produced with caller-owned scratch.
+func memoToStringIn(mdb *MdbHandle, page []byte, start, size int, s *decodeScratch) string {
+	if size < MemoOverhead {
+		return ""
+	}
+
+	memoLen := GetInt32(page, start)
+
+	if memoLen&0x80000000 != 0 {
+		// Inline memo
+		return unicodeScratch(page[start+MemoOverhead:start+size], mdb.IsJet4(), s)
+	} else if memoLen&0x40000000 != 0 {
+		// Single-page memo
+		pgRow := GetInt32(page, start+4)
+		buf, rowStart, length, ok := mdb.memoPageView(pgRow)
+		if !ok {
+			return ""
+		}
+		return unicodeScratch(buf[rowStart:rowStart+length], mdb.IsJet4(), s)
+	} else if (memoLen & 0xFF000000) == 0 {
+		// Multi-page memo: decode the page chain as one continuing stream
+		// directly into the UTF-8 scratch, skipping a raw concatenation pass.
+		out := s.unicode[:0]
+		st := unicodeChunkState{}
+		first := true
+		pgRow := GetInt32(page, start+4)
+		for {
+			buf, rowStart, length, ok := mdb.memoPageView(pgRow)
+			if !ok || length < 4 {
+				break
+			}
+			out = appendUnicodeChunk(out, buf[rowStart+4:rowStart+length], first, mdb.IsJet4(), &st)
+			first = false
+			pgRow = GetInt32(buf, rowStart)
+			if (pgRow >> 8) == 0 {
+				break
+			}
+		}
+		s.unicode = out
+		return string(out)
+	}
+
+	return ""
 }
 
 // dateTimeToString converts a DateTime column value to string.

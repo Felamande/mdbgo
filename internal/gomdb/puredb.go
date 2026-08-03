@@ -5,6 +5,7 @@
 package gomdb
 
 import (
+	"encoding/binary"
 	"strconv"
 	"time"
 )
@@ -14,6 +15,7 @@ import (
 type Query struct {
 	sql     *SQL
 	ownsMdb bool
+	fast    *fastScan
 }
 
 // OpenQuery opens an MDB database and executes a SQL query.
@@ -56,7 +58,11 @@ func openQueryOnMdb(mdb *MdbHandle, query string) (*Query, error) {
 		return nil, &Error{Msg: "mdb: query produced no columns"}
 	}
 
-	return &Query{sql: sql}, nil
+	q := &Query{sql: sql}
+	if canFastScan(mdb, sql) {
+		q.fast = newFastScan(mdb, sql)
+	}
+	return q, nil
 }
 
 // Close frees resources associated with the query.
@@ -65,6 +71,10 @@ func openQueryOnMdb(mdb *MdbHandle, query string) (*Query, error) {
 func (q *Query) Close() error {
 	if q.sql == nil {
 		return nil
+	}
+	if q.fast != nil {
+		q.fast.close()
+		q.fast = nil
 	}
 	if q.ownsMdb && q.sql.Mdb != nil {
 		q.sql.Mdb.Close()
@@ -79,6 +89,9 @@ func (q *Query) Close() error {
 func (q *Query) Next() (bool, error) {
 	if q.sql == nil {
 		return false, nil
+	}
+	if q.fast != nil {
+		return q.fast.nextRow()
 	}
 	return q.sql.FetchRow()
 }
@@ -108,13 +121,92 @@ func (q *Query) Value(i int) string {
 	if q.sql == nil {
 		return ""
 	}
+	if q.fast != nil {
+		return q.fast.value(i)
+	}
 	return q.sql.Value(i)
+}
+
+// DriverValue returns the native database/sql value for a result column in
+// the current row: nil, bool, int64, float64, time.Time, []byte, or string.
+// It resolves the bound column once and converts in a single switch, avoiding
+// the per-column IsNull/getter/value lookup chain used by the legacy API.
+func (q *Query) DriverValue(i int) any {
+	if q.sql == nil {
+		return nil
+	}
+	if q.fast != nil {
+		return q.fast.driverValue(i)
+	}
+	sql := q.sql
+	if i < 0 || i >= sql.NumColumns || sql.CurTable == nil {
+		return nil
+	}
+	col := sql.boundColumn(i)
+	if col == nil || col.CurValueIsNull {
+		return nil
+	}
+	mdb := sql.Mdb
+	if mdb == nil {
+		return nil
+	}
+
+	buf := mdb.pgBuf
+	start := col.CurValueStart
+	switch col.ColType {
+	case TypeBool:
+		return col.CurValueLen != 0
+	case TypeByte:
+		if col.CurValueLen >= 1 {
+			return int64(buf[start])
+		}
+	case TypeInt:
+		if col.CurValueLen >= 2 {
+			return int64(GetInt16(buf, start))
+		}
+	case TypeLongInt, TypeComplex:
+		if col.CurValueLen >= 4 {
+			return int64(GetInt32(buf, start))
+		}
+	case TypeFloat:
+		if col.CurValueLen >= 4 {
+			return compatibilityFloat64(float64(GetSingle(buf, start)), 8, 32)
+		}
+	case TypeDouble:
+		if col.CurValueLen >= 8 {
+			return compatibilityFloat64(GetDouble(buf, start), 16, 64)
+		}
+	case TypeMoney:
+		if col.CurValueLen >= 8 {
+			return float64(int64(binary.LittleEndian.Uint64(buf[start:]))) / 10000
+		}
+	case TypeDateTime:
+		return DateToTime(GetDouble(buf, start))
+	case TypeBinary:
+		return mdb.BinaryValue(col)
+	default:
+		return sql.Value(i)
+	}
+	return sql.Value(i)
+}
+
+// DriverRow returns the preformatted native values for the current row on
+// fast-scan queries, or nil when the synchronous path is in use. Callers
+// should fall back to DriverValue when nil is returned.
+func (q *Query) DriverRow() []any {
+	if q.fast != nil {
+		return q.fast.driverRow()
+	}
+	return nil
 }
 
 // IsNull returns true if column i is NULL in the current row.
 func (q *Query) IsNull(i int) bool {
 	if q.sql == nil {
 		return true
+	}
+	if q.fast != nil {
+		return q.fast.isNull(i)
 	}
 	return q.sql.IsNull(i)
 }
@@ -124,6 +216,9 @@ func (q *Query) BinaryValue(i int) []byte {
 	if q.sql == nil {
 		return nil
 	}
+	if q.fast != nil {
+		return q.fast.binaryValue(i)
+	}
 	return q.sql.BinaryValue(i)
 }
 
@@ -131,6 +226,9 @@ func (q *Query) BinaryValue(i int) []byte {
 func (q *Query) DateTimeValue(i int) (time.Time, bool) {
 	if q.sql == nil {
 		return time.Time{}, false
+	}
+	if q.fast != nil {
+		return q.fast.dateTimeValue(i)
 	}
 	return q.sql.DateTimeValue(i)
 }
@@ -140,6 +238,9 @@ func (q *Query) BoolValue(i int) (bool, bool) {
 	if q.sql == nil {
 		return false, false
 	}
+	if q.fast != nil {
+		return q.fast.boolValue(i)
+	}
 	return q.sql.BoolValue(i)
 }
 
@@ -148,6 +249,9 @@ func (q *Query) Int64Value(i int) (int64, bool) {
 	if q.sql == nil {
 		return 0, false
 	}
+	if q.fast != nil {
+		return q.fast.int64Value(i)
+	}
 	return q.sql.Int64Value(i)
 }
 
@@ -155,6 +259,9 @@ func (q *Query) Int64Value(i int) (int64, bool) {
 func (q *Query) Float64Value(i int) (float64, bool) {
 	if q.sql == nil {
 		return 0, false
+	}
+	if q.fast != nil {
+		return q.fast.float64Value(i)
 	}
 	return q.sql.Float64Value(i)
 }

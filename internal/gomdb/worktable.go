@@ -26,6 +26,7 @@ func (mdb *MdbHandle) CreateTempTable(name string) *MdbTableDef {
 func (mdb *MdbHandle) TempTableAddCol(table *MdbTableDef, col *MdbColumn) {
 	col.Table = table
 	col.ColNum = table.NumCols
+	col.setNullMask()
 	if !col.IsFixed {
 		col.VarColNum = table.NumVarCols
 		table.NumVarCols++
@@ -172,7 +173,6 @@ func (mdb *MdbHandle) PackRow(table *MdbTableDef, rowBuf []byte, numFields int, 
 		varFields = append(varFields, field)
 	}
 
-	
 	for i, field := range varFields {
 		varOffsets[i] = pos
 		if field != nil && !field.IsNull && field.Value != nil {
@@ -297,19 +297,19 @@ func (mdb *MdbHandle) DescribeTable(sql *SQL, tableName string) error {
 	FillTempCol(col1, "Column Name", 30, TypeText, false)
 	col1.RowColNum = 1
 	mdb.TempTableAddCol(ttable, col1)
-		sql.AddColumn("Column Name")
+	sql.AddColumn("Column Name")
 
 	col2 := &MdbColumn{}
 	FillTempCol(col2, "Type", 20, TypeText, false)
 	col2.RowColNum = 2
 	mdb.TempTableAddCol(ttable, col2)
-		sql.AddColumn("Type")
+	sql.AddColumn("Type")
 
 	col3 := &MdbColumn{}
 	FillTempCol(col3, "Size", 10, TypeText, false)
 	col3.RowColNum = 3
 	mdb.TempTableAddCol(ttable, col3)
-		sql.AddColumn("Size")
+	sql.AddColumn("Size")
 
 	var fields [3]MdbField
 	rowBuf := make([]byte, mdb.fmt.PgSize)

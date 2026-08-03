@@ -49,6 +49,7 @@ type MdbTableDef struct {
 	// Pre-allocated field buffer for row cracking (reused across rows)
 	fieldsBuf     []MdbField
 	varOffsetsBuf []int
+	crackLayouts  []crackLayout
 
 	Props *Properties
 }
@@ -193,6 +194,7 @@ func (mdb *MdbHandle) ReadColumns(table *MdbTableDef) error {
 			ColType: int(colBuf[0]),
 			ColNum:  int(colBuf[mfmt.ColNumOffset]),
 		}
+		col.setNullMask()
 
 		col.VarColNum = GetInt16(colBuf, mfmt.TabColOffsetVar)
 		col.RowColNum = GetInt16(colBuf, mfmt.TabRowColNumOffset)
@@ -263,6 +265,13 @@ func sortColumnsByNum(cols []*MdbColumn) {
 		}
 		cols[j+1] = key
 	}
+}
+
+// setNullMask precomputes the null-mask byte/bit position for ColNum.
+func (col *MdbColumn) setNullMask() {
+	col.NullByte = col.ColNum / 8
+	col.NullBit = uint8(1 << (col.ColNum % 8))
+	col.NullReady = true
 }
 
 // IsUserTable returns true if this is a user table (not system, not linked).

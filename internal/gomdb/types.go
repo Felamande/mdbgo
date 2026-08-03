@@ -14,30 +14,30 @@ const (
 
 // Jet version constants
 const (
-	Jet3        = 0
-	Jet4        = 1
-	Accdb2007   = 2
-	Accdb2010   = 3
-	Accdb2013   = 4
-	Accdb2016   = 5
-	Accdb2019   = 6
+	Jet3      = 0
+	Jet4      = 1
+	Accdb2007 = 2
+	Accdb2010 = 3
+	Accdb2013 = 4
+	Accdb2016 = 5
+	Accdb2019 = 6
 )
 
 // Object types
 const (
-	ObjForm               = 0
-	ObjTable              = 1
-	ObjMacro              = 2
-	ObjSystemTable        = 3
-	ObjReport             = 4
-	ObjQuery              = 5
-	ObjLinkedTable        = 6
-	ObjModule             = 7
-	ObjRelationship       = 8
-	ObjUnknown09          = 9
-	ObjUnknown0A          = 10
-	ObjDatabaseProperty   = 11
-	ObjAny                = -1
+	ObjForm             = 0
+	ObjTable            = 1
+	ObjMacro            = 2
+	ObjSystemTable      = 3
+	ObjReport           = 4
+	ObjQuery            = 5
+	ObjLinkedTable      = 6
+	ObjModule           = 7
+	ObjRelationship     = 8
+	ObjUnknown09        = 9
+	ObjUnknown0A        = 10
+	ObjDatabaseProperty = 11
+	ObjAny              = -1
 )
 
 // Column data types
@@ -61,19 +61,19 @@ const (
 
 // Search argument operators
 const (
-	OpOr     = 1
-	OpAnd    = 2
-	OpNot    = 3
-	OpEqual  = 4
-	OpGT     = 5
-	OpLT     = 6
-	OpGTEQ   = 7
-	OpLTEQ   = 8
-	OpLike   = 9
-	OpIsNull = 10
+	OpOr      = 1
+	OpAnd     = 2
+	OpNot     = 3
+	OpEqual   = 4
+	OpGT      = 5
+	OpLT      = 6
+	OpGTEQ    = 7
+	OpLTEQ    = 8
+	OpLike    = 9
+	OpIsNull  = 10
 	OpNotNull = 11
-	OpILike  = 12
-	OpNEQ    = 13
+	OpILike   = 12
+	OpNEQ     = 13
 )
 
 // Index-related

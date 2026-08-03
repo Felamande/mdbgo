@@ -81,8 +81,12 @@ func colBindSize(col *MdbColumn) int {
 		return 30
 	case TypeText:
 		n := col.ColSize * 3 // UCS-2 to UTF-8 can triple for CJK
-		if n < 64 { n = 64 }
-		if n > 8192 { n = 8192 }
+		if n < 64 {
+			n = 64
+		}
+		if n > 8192 {
+			n = 8192
+		}
 		return n
 	case TypeMemo:
 		// Match cmdb's MDB_BIND_SIZE=16384 for large memo fields.
@@ -90,7 +94,9 @@ func colBindSize(col *MdbColumn) int {
 		return 16384
 	case TypeBinary, TypeOLE:
 		n := col.ColSize + MemoOverhead
-		if n < 64 { n = 64 }
+		if n < 64 {
+			n = 64
+		}
 		return n
 	default:
 		return 256

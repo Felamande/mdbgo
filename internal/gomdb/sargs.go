@@ -32,6 +32,13 @@ func TestSargs(mdb *MdbHandle, table *MdbTableDef, fields []MdbField) bool {
 
 // testSargNode recursively evaluates a sarg node.
 func testSargNode(mdb *MdbHandle, node *SargNode, fields []MdbField) int {
+	return testSargNodeScratch(mdb, node, fields, mdb.pgBuf, nil)
+}
+
+// testSargNodeScratch evaluates a sarg node against fields cracked from an
+// explicit page. When scratch is non-nil (fast scan workers), decoding uses
+// the worker's buffers and pure memo page access instead of handle state.
+func testSargNodeScratch(mdb *MdbHandle, node *SargNode, fields []MdbField, page []byte, s *decodeScratch) int {
 	if node == nil {
 		return 1
 	}
@@ -49,7 +56,7 @@ func testSargNode(mdb *MdbHandle, node *SargNode, fields []MdbField) int {
 			return 0
 		}
 
-		if testSarg(mdb, col, node, &fields[col.ColNum]) {
+		if testSargScratch(mdb, col, node, &fields[col.ColNum], page, s) {
 			return 1
 		}
 		return 0
@@ -59,25 +66,25 @@ func testSargNode(mdb *MdbHandle, node *SargNode, fields []MdbField) int {
 	switch node.Op {
 	case OpNot:
 		if node.Left != nil {
-			return 1 - testSargNode(mdb, node.Left, fields)
+			return 1 - testSargNodeScratch(mdb, node.Left, fields, page, s)
 		}
 		return 0
 
 	case OpAnd:
-		if node.Left != nil && !toBool(testSargNode(mdb, node.Left, fields)) {
+		if node.Left != nil && !toBool(testSargNodeScratch(mdb, node.Left, fields, page, s)) {
 			return 0
 		}
 		if node.Right != nil {
-			return testSargNode(mdb, node.Right, fields)
+			return testSargNodeScratch(mdb, node.Right, fields, page, s)
 		}
 		return 1
 
 	case OpOr:
-		if node.Left != nil && toBool(testSargNode(mdb, node.Left, fields)) {
+		if node.Left != nil && toBool(testSargNodeScratch(mdb, node.Left, fields, page, s)) {
 			return 1
 		}
 		if node.Right != nil {
-			return testSargNode(mdb, node.Right, fields)
+			return testSargNodeScratch(mdb, node.Right, fields, page, s)
 		}
 		return 0
 	}
@@ -89,6 +96,11 @@ func toBool(v int) bool { return v != 0 }
 
 // testSarg tests a single sarg condition against a field.
 func testSarg(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField) bool {
+	return testSargScratch(mdb, col, node, field, mdb.pgBuf, nil)
+}
+
+// testSargScratch is the page/scratch-aware form of testSarg.
+func testSargScratch(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField, page []byte, s *decodeScratch) bool {
 	if node.Op == OpIsNull {
 		return field.IsNull
 	}
@@ -151,13 +163,21 @@ func testSarg(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField) b
 		if field.IsNull {
 			return false
 		}
+		if s != nil {
+			return testSargStringIn(mdb, node, field.Value, s)
+		}
 		return mdb.testSargString(node, field.Value)
 
 	case TypeMemo, TypeRepID:
 		if field.IsNull {
 			return false
 		}
-		val := mdb.valueFromField(col, field)
+		var val string
+		if s != nil {
+			val = colToStringIn(mdb, col, field, page, s)
+		} else {
+			val = mdb.valueFromField(col, field)
+		}
 		return testString(node, val)
 
 	case TypeDateTime:
@@ -171,6 +191,19 @@ func testSarg(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField) b
 	default:
 		return true
 	}
+}
+
+// testSargStringIn evaluates a string sarg with caller-owned scratch.
+func testSargStringIn(mdb *MdbHandle, node *SargNode, src []byte, s *decodeScratch) bool {
+	if node.Op == OpILike {
+		return testString(node, unicodeScratch(src, mdb.IsJet4(), s))
+	}
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return testStringBytes(node, body)
+	}
+	buf := appendUnicodeUTF8(s.unicode[:0], src, mdb.IsJet4())
+	s.unicode = buf
+	return testStringBytes(node, buf)
 }
 
 // valueFromField gets the string value from a field for the given column type.

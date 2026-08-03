@@ -16,6 +16,7 @@ func TestTempTableRoundTrip(t *testing.T) {
 		f:   &MdbFile{jetVersion: Jet4},
 		fmt: &Jet4FormatConstants,
 	}
+	mdb.pgBuf = mdb.pgArr[:]
 	table := mdb.CreateTempTable("#roundtrip")
 
 	textCol := &MdbColumn{}
@@ -94,6 +95,7 @@ func TestTempTableMultiPageRoundTrip(t *testing.T) {
 		f:   &MdbFile{jetVersion: Jet4},
 		fmt: &Jet4FormatConstants,
 	}
+	mdb.pgBuf = mdb.pgArr[:]
 	table := mdb.CreateTempTable("#multipage")
 
 	col := &MdbColumn{}

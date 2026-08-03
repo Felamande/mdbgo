@@ -1,6 +1,7 @@
 package gomdb
 
 import (
+	"encoding/binary"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -15,8 +16,20 @@ func unicodeFastPath(src []byte, isJet4 bool) ([]byte, bool) {
 		return nil, false
 	}
 	body := src[2:]
-	for _, b := range body {
-		if b == 0 || b >= utf8.RuneSelf {
+	// Check eight bytes at a time: no byte may have the high bit set (>= 0x80)
+	// and no byte may be zero. The second test is the classic haszero word
+	// trick; it borrows from the top bit, which is already excluded above.
+	const msb = 0x8080808080808080
+	const ones = 0x0101010101010101
+	i := 0
+	for ; i+8 <= len(body); i += 8 {
+		w := binary.LittleEndian.Uint64(body[i:])
+		if w&msb != 0 || (w-ones)&^w&msb != 0 {
+			return nil, false
+		}
+	}
+	for ; i < len(body); i++ {
+		if body[i] == 0 || body[i] >= utf8.RuneSelf {
 			return nil, false
 		}
 	}
@@ -79,79 +92,149 @@ func appendUTF16Unit(dst []byte, pendingHigh *uint16, unit uint16) []byte {
 		*pendingHigh = unit
 	case unit >= 0xdc00 && unit <= 0xdfff:
 		dst = utf8.AppendRune(dst, utf8.RuneError)
+	case unit < 0x80:
+		dst = append(dst, byte(unit))
+	case unit < 0x800:
+		dst = append(dst, 0xc0|byte(unit>>6), 0x80|byte(unit&0x3f))
 	default:
-		dst = utf8.AppendRune(dst, rune(unit))
+		dst = append(dst,
+			0xe0|byte(unit>>12),
+			0x80|byte((unit>>6)&0x3f),
+			0x80|byte(unit&0x3f))
 	}
 	return dst
 }
 
 func appendUTF16LE(dst, src []byte) []byte {
 	var pendingHigh uint16
+	return appendUTF16LEState(dst, src, &pendingHigh)
+}
+
+// appendUTF16LEState decodes UTF-16LE units, carrying a pending high
+// surrogate across chunk boundaries (multi-page memo streams).
+func appendUTF16LEState(dst, src []byte, pendingHigh *uint16) []byte {
 	i := 0
 	for i+1 < len(src) {
 		// Bulk-copy runs of ASCII units (high byte 0x00, low byte below
 		// RuneSelf); those cannot interact with a pending surrogate either.
-		if src[i+1] == 0 && src[i] < utf8.RuneSelf && pendingHigh == 0 {
-			j := i + 2
-			for j+1 < len(src) && src[j+1] == 0 && src[j] < utf8.RuneSelf {
-				j += 2
+		if src[i+1] == 0 && src[i] < utf8.RuneSelf && *pendingHigh == 0 {
+			j := asciiUTF16RunLen(src, i)
+			// Copy the low bytes of the ASCII units.
+			low := src[i:j:j]
+			dst = append(dst, low[0])
+			for k := 2; k < len(low); k += 2 {
+				dst = append(dst, low[k])
 			}
-			for ; i < j; i += 2 {
-				dst = append(dst, src[i])
-			}
+			i = j
 			continue
 		}
 		unit := uint16(src[i]) | uint16(src[i+1])<<8
-		dst = appendUTF16Unit(dst, &pendingHigh, unit)
+		dst = appendUTF16Unit(dst, pendingHigh, unit)
 		i += 2
 	}
-	if pendingHigh != 0 {
+	if *pendingHigh != 0 {
 		dst = utf8.AppendRune(dst, utf8.RuneError)
+		*pendingHigh = 0
 	}
 	return dst
 }
 
+// asciiUTF16RunLen returns the end of a run of UTF-16LE units whose high byte
+// is 0 and whose low byte is below RuneSelf, checked eight bytes at a time.
+func asciiUTF16RunLen(src []byte, start int) int {
+	i := start
+	for i+8 <= len(src) {
+		w := binary.LittleEndian.Uint64(src[i:])
+		// Odd bytes (high bytes) must be zero; even bytes (low bytes) must
+		// not have the high bit set.
+		if w&0xFF80FF80FF80FF80 != 0 {
+			break
+		}
+		i += 8
+	}
+	for i+1 < len(src) && src[i+1] == 0 && src[i] < utf8.RuneSelf {
+		i += 2
+	}
+	return i
+}
+
+// asciiRunLen returns the end of a run of bytes that are neither zero nor
+// >= RuneSelf, checked eight bytes at a time.
+func asciiRunLen(src []byte, start int) int {
+	i := start
+	for i+8 <= len(src) {
+		w := binary.LittleEndian.Uint64(src[i:])
+		const msb = 0x8080808080808080
+		const ones = 0x0101010101010101
+		if w&msb != 0 || (w-ones)&^w&msb != 0 {
+			break
+		}
+		i += 8
+	}
+	for i < len(src) && src[i] != 0 && src[i] < utf8.RuneSelf {
+		i++
+	}
+	return i
+}
+
 func appendCompressedUnicode(dst, src []byte) []byte {
-	compressed := true
-	var pendingHigh uint16
+	st := unicodeChunkState{compressed: true}
+	return appendCompressedUnicodeState(dst, src, &st)
+}
+
+// unicodeChunkState carries compression mode and a pending surrogate across
+// chunks of a single multi-page memo stream.
+type unicodeChunkState struct {
+	compressed  bool
+	pendingHigh uint16
+}
+
+func appendCompressedUnicodeState(dst, src []byte, st *unicodeChunkState) []byte {
 	i := 0
 	for i < len(src) {
 		if src[i] == 0 {
-			compressed = !compressed
+			st.compressed = !st.compressed
 			i++
 			continue
 		}
-		if compressed {
-			// Process the run of bytes up to the next mode toggle at once.
-			j := i
-			for j < len(src) && src[j] != 0 {
-				j++
+		if st.compressed {
+			// An unpaired high surrogate is resolved before consuming the
+			// next compressed unit, mirroring the per-unit decoder.
+			if st.pendingHigh != 0 {
+				dst = utf8.AppendRune(dst, utf8.RuneError)
+				st.pendingHigh = 0
+				continue
 			}
 			// Compressed bytes decode to U+00xx, which can never complete a
-			// pending surrogate pair, so bulk-copy the ASCII prefix of the
-			// run (each byte is its own UTF-8 character).
-			if pendingHigh == 0 {
-				k := i
-				for k < j && src[k] < utf8.RuneSelf {
-					k++
-				}
-				dst = append(dst, src[i:k]...)
-				i = k
+			// pending surrogate pair, so copy the ASCII prefix of the run in
+			// bulk (each byte is its own UTF-8 character), then encode the
+			// non-ASCII bytes directly.
+			k := asciiRunLen(src, i)
+			dst = append(dst, src[i:k]...)
+			i = k
+			if i >= len(src) {
+				continue
 			}
-			for ; i < j; i++ {
-				dst = appendUTF16Unit(dst, &pendingHigh, uint16(src[i]))
+			if src[i] == 0 {
+				st.compressed = !st.compressed
+				i++
+				continue
 			}
+			b := src[i]
+			dst = append(dst, 0xc0|(b>>6), 0x80|(b&0x3f))
+			i++
 			continue
 		}
 		if i+1 >= len(src) {
 			break
 		}
 		unit := uint16(src[i]) | uint16(src[i+1])<<8
-		dst = appendUTF16Unit(dst, &pendingHigh, unit)
+		dst = appendUTF16Unit(dst, &st.pendingHigh, unit)
 		i += 2
 	}
-	if pendingHigh != 0 {
+	if st.pendingHigh != 0 {
 		dst = utf8.AppendRune(dst, utf8.RuneError)
+		st.pendingHigh = 0
 	}
 	return dst
 }
@@ -180,6 +263,25 @@ func appendUnicodeUTF8(dst, src []byte, isJet4 bool) []byte {
 	return appendUTF16LE(dst, src)
 }
 
+// appendUnicodeChunk appends the UTF-8 form of one chunk of a multi-page
+// memo stream. The first chunk may carry the 0xFF 0xFE compression prefix;
+// compression mode and surrogate state continue across chunks.
+func appendUnicodeChunk(dst, src []byte, first bool, isJet4 bool, st *unicodeChunkState) []byte {
+	if !isJet4 {
+		return appendLatin1UTF8(dst, src)
+	}
+	if first && len(src) >= 2 && src[0] == 0xff && src[1] == 0xfe {
+		src = src[2:]
+		st.compressed = true
+	} else if first {
+		return appendUTF16LEState(dst, src, &st.pendingHigh)
+	}
+	if st.compressed {
+		return appendCompressedUnicodeState(dst, src, st)
+	}
+	return appendUTF16LEState(dst, src, &st.pendingHigh)
+}
+
 func unicodeUTF8Capacity(src []byte, isJet4 bool) int {
 	if !isJet4 {
 		return len(src) * 2
@@ -188,6 +290,20 @@ func unicodeUTF8Capacity(src []byte, isJet4 bool) int {
 		return (len(src) - 2) * 2
 	}
 	return (len(src) / 2) * 3
+}
+
+// unicodeScratch converts src to a UTF-8 string using caller-owned scratch.
+// The returned string owns its bytes (string() copies), so the scratch may
+// be reused immediately.
+func unicodeScratch(src []byte, isJet4 bool, s *decodeScratch) string {
+	if len(src) == 0 {
+		return ""
+	}
+	if body, ok := unicodeFastPath(src, isJet4); ok {
+		return string(body)
+	}
+	s.unicode = appendUnicodeUTF8(s.unicode[:0], src, isJet4)
+	return string(s.unicode)
 }
 
 // ucs2ToUTF8 converts a UCS-2LE encoded byte slice to a UTF-8 string.

@@ -17,6 +17,12 @@ type MdbColumn struct {
 	VarColNum   int
 	RowColNum   int
 
+	// Null-mask position, precomputed from ColNum so row cracking avoids
+	// per-column division and modulo.
+	NullByte  int
+	NullBit   uint8
+	NullReady bool
+
 	// Sargs for this column
 	Sargs []*MdbSarg
 

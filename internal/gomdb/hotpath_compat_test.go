@@ -228,10 +228,13 @@ func (r *countingReaderAt) ReadAt(dst []byte, off int64) (int, error) {
 }
 
 func testHandle(reader *countingReaderAt, dbKey uint32) *MdbHandle {
-	return &MdbHandle{
+	mdb := &MdbHandle{
 		f:   &MdbFile{stream: reader, size: int64(len(reader.data)), dbKey: dbKey, jetVersion: Jet4},
 		fmt: &Jet4FormatConstants,
 	}
+	mdb.pgBuf = mdb.pgArr[:]
+	mdb.altPgBuf = mdb.altPgArr[:]
+	return mdb
 }
 
 func TestReadAltPageDecryptsCachesAndKeepsMainPage(t *testing.T) {
@@ -377,6 +380,7 @@ func TestCrackRowReusesVariableOffsetScratch(t *testing.T) {
 		f:   &MdbFile{jetVersion: Jet4},
 		fmt: &Jet4FormatConstants,
 	}
+	mdb.pgBuf = mdb.pgArr[:]
 	table := mdb.CreateTempTable("#scratch")
 	col := &MdbColumn{}
 	FillTempCol(col, "value", 32, TypeText, false)
@@ -463,6 +467,7 @@ func TestSQLValuesAreFormattedLazily(t *testing.T) {
 
 func TestLazyValuePreservesBoundBufferRepresentations(t *testing.T) {
 	mdb := &MdbHandle{}
+	mdb.pgBuf = mdb.pgArr[:]
 	copy(mdb.pgBuf[64:], []byte{'a', 0, 'b'})
 	copy(mdb.pgBuf[128:], "abcdefghijkl")
 	tests := []struct {

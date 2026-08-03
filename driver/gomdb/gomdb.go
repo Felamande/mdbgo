@@ -184,8 +184,14 @@ func (r *Rows) Next(dest []driver.Value) error {
 	if len(dest) < len(r.cols) {
 		return fmt.Errorf("mdb: destination has %d values, need %d", len(dest), len(r.cols))
 	}
+	if vals := r.h.DriverRow(); vals != nil && len(vals) >= len(r.cols) {
+		for i := range r.cols {
+			dest[i] = vals[i]
+		}
+		return nil
+	}
 	for i := range r.cols {
-		dest[i] = r.value(i)
+		dest[i] = r.h.DriverValue(i)
 	}
 	return nil
 }
@@ -227,33 +233,6 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 		return reflect.TypeOf([]byte{})
 	}
 	return reflect.TypeOf("")
-}
-
-func (r *Rows) value(index int) driver.Value {
-	if r.h.IsNull(index) {
-		return nil
-	}
-	switch r.info[index].Type {
-	case backend.TypeBool:
-		if v, ok := r.h.BoolValue(index); ok {
-			return v
-		}
-	case backend.TypeByte, backend.TypeInt, backend.TypeLongInt, backend.TypeComplex:
-		if v, ok := r.h.Int64Value(index); ok {
-			return v
-		}
-	case backend.TypeMoney, backend.TypeFloat, backend.TypeDouble:
-		if v, ok := r.h.Float64Value(index); ok {
-			return v
-		}
-	case backend.TypeDateTime:
-		if v, ok := r.h.DateTimeValue(index); ok {
-			return v
-		}
-	case backend.TypeBinary:
-		return r.h.BinaryValue(index)
-	}
-	return r.h.Value(index)
 }
 
 var _ driver.Rows = (*Rows)(nil)

@@ -2,18 +2,72 @@ package gomdb
 
 import "fmt"
 
+// decodeScratch holds per-row buffers that are reused by row cracking,
+// sarg evaluation, and value formatting. A fast scan gives every worker its
+// own scratch so pages can be decoded in parallel without touching the
+// handle's shared buffers.
+type decodeScratch struct {
+	fields     []MdbField
+	varOffsets []int
+	unicode    []byte
+	layouts    []crackLayout
+}
+
+// crackLayout is the per-column data needed to crack rows, packed into a
+// compact struct so the hot loop avoids chasing column pointers.
+type crackLayout struct {
+	isFixed     bool
+	nullByte    uint8
+	nullBit     uint8
+	fixedOffset int32
+	colSize     int32
+	varNum      int32
+}
+
+func buildCrackLayouts(table *MdbTableDef) []crackLayout {
+	layouts := make([]crackLayout, len(table.Columns))
+	for i, col := range table.Columns {
+		layouts[i] = crackLayout{
+			isFixed:     col.IsFixed,
+			nullByte:    uint8(col.NullByte),
+			nullBit:     col.NullBit,
+			fixedOffset: int32(col.FixedOffset),
+			colSize:     int32(col.ColSize),
+			varNum:      int32(col.VarColNum),
+		}
+	}
+	return layouts
+}
+
 // CrackRow parses a raw row into individual fields.
 // This is a direct port of mdb_crack_row from mdbtools write.c.
 func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]MdbField, error) {
+	if len(table.crackLayouts) != table.NumCols {
+		table.crackLayouts = buildCrackLayouts(table)
+	}
+	s := &decodeScratch{fields: table.fieldsBuf, varOffsets: table.varOffsetsBuf}
+	s.layouts = table.crackLayouts
+	fields, err := crackRowInto(mdb, table, mdb.pgBuf, rowStart, rowSize, s, true)
+	table.fieldsBuf = s.fields
+	table.varOffsetsBuf = s.varOffsets
+	return fields, err
+}
+
+// crackRowInto parses a row from an explicit page buffer using caller-owned
+// scratch. This is the shared implementation used by the synchronous path
+// (page = mdb.pgBuf, scratch = table buffers) and by fast-scan workers.
+// When needValues is false (fast scans without sargs), per-field Value slices
+// are skipped; only Start/Siz/IsNull are populated.
+func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, rowSize int, s *decodeScratch, needValues bool) ([]MdbField, error) {
 	rowEnd := rowStart + rowSize - 1
 
 	// Read row column count
 	var rowCols, colCountSize int
 	if mdb.IsJet3() {
-		rowCols = int(mdb.pgBuf[rowStart])
+		rowCols = int(page[rowStart])
 		colCountSize = 1
 	} else {
-		rowCols = GetInt16(mdb.pgBuf[:], rowStart)
+		rowCols = GetInt16(page, rowStart)
 		colCountSize = 2
 	}
 
@@ -23,29 +77,28 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 	}
 
 	// Null mask is at the end of the row
-	nullMask := mdb.pgBuf[rowEnd-bitmaskSz+1:]
+	nullMask := page[rowEnd-bitmaskSz+1:]
 
 	// Read variable column offsets table (from end of row for Jet4)
 	var rowVarCols int
 	var varColOffsets []int
 	if table.NumVarCols > 0 {
 		if mdb.IsJet3() {
-			rowVarCols = int(mdb.pgBuf[rowEnd-bitmaskSz])
+			rowVarCols = int(page[rowEnd-bitmaskSz])
 		} else {
-			rowVarCols = GetInt16(mdb.pgBuf[:], rowEnd-bitmaskSz-1)
+			rowVarCols = GetInt16(page, rowEnd-bitmaskSz-1)
 		}
 
 		need := rowVarCols + 1
-		if cap(table.varOffsetsBuf) < need {
-			table.varOffsetsBuf = make([]int, need)
+		if cap(s.varOffsets) < need {
+			s.varOffsets = make([]int, need)
 		}
-		varColOffsets = table.varOffsetsBuf[:need]
-		clear(varColOffsets)
+		varColOffsets = s.varOffsets[:need]
 
 		if mdb.IsJet3() {
-			crackRow3Offsets(mdb, rowStart, rowEnd, bitmaskSz, rowVarCols, varColOffsets)
+			crackRow3OffsetsIn(mdb, page, rowStart, rowEnd, bitmaskSz, rowVarCols, varColOffsets)
 		} else {
-			crackRow4Offsets(mdb, rowEnd, bitmaskSz, rowVarCols, varColOffsets)
+			crackRow4OffsetsIn(page, rowEnd, bitmaskSz, rowVarCols, varColOffsets)
 		}
 	}
 
@@ -56,24 +109,53 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 	fixedColsFound := 0
 
 	// Reuse pre-allocated field buffer, or allocate once
-	if cap(table.fieldsBuf) < table.NumCols {
-		table.fieldsBuf = make([]MdbField, table.NumCols)
+	if cap(s.fields) < table.NumCols {
+		s.fields = make([]MdbField, table.NumCols)
 	}
-	fields := table.fieldsBuf[:table.NumCols]
+	fields := s.fields[:table.NumCols]
 
+	layouts := s.layouts
+	if len(layouts) != table.NumCols {
+		layouts = nil
+	}
 	for i := 0; i < table.NumCols; i++ {
-		col := table.Columns[i]
+		var (
+			col       *MdbColumn
+			layout    crackLayout
+			hasLayout bool
+		)
+		if layouts != nil {
+			layout = layouts[i]
+			hasLayout = true
+		} else {
+			col = table.Columns[i]
+		}
 		f := &fields[i]
 		f.Value = nil
 		f.ColNum = i
-		f.IsFixed = col.IsFixed
+		if hasLayout {
+			f.IsFixed = layout.isFixed
+		} else {
+			f.IsFixed = col.IsFixed
+		}
 
-		// Null bit check — uses col->col_num, NOT row_col_num
-		byteNum := col.ColNum / 8
-		bitNum := col.ColNum % 8
+		// Null bit check — uses col->col_num, NOT row_col_num. The mask
+		// offset is precomputed at column-definition time.
+		var byteNum int
+		var bitNum byte
+		if hasLayout {
+			byteNum = int(layout.nullByte)
+			bitNum = layout.nullBit
+		} else {
+			byteNum, bitNum = col.NullByte, byte(col.NullBit)
+			if !col.NullReady {
+				byteNum = col.ColNum / 8
+				bitNum = byte(1 << (col.ColNum % 8))
+			}
+		}
 
 		if byteNum < len(nullMask) {
-			if nullMask[byteNum]&(1<<bitNum) != 0 {
+			if nullMask[byteNum]&bitNum != 0 {
 				f.IsNull = false
 			} else {
 				f.IsNull = true
@@ -82,20 +164,40 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 			f.IsNull = true
 		}
 
-		if col.IsFixed && fixedColsFound < rowFixedCols {
-			colStart := col.FixedOffset + colCountSize
+		isFixed := layout.isFixed
+		if !hasLayout {
+			isFixed = col.IsFixed
+		}
+		var varNum int
+		if !isFixed {
+			if hasLayout {
+				varNum = int(layout.varNum)
+			} else {
+				varNum = col.VarColNum
+			}
+		}
+		if isFixed && fixedColsFound < rowFixedCols {
+			var colStart int
+			var colSize int
+			if hasLayout {
+				colStart = int(layout.fixedOffset) + colCountSize
+				colSize = int(layout.colSize)
+			} else {
+				colStart = col.FixedOffset + colCountSize
+				colSize = col.ColSize
+			}
 			f.Start = rowStart + colStart
-			f.Siz = col.ColSize
-			if f.Siz > 0 && rowStart+colStart+f.Siz <= len(mdb.pgBuf) {
-				f.Value = mdb.pgBuf[rowStart+colStart : rowStart+colStart+f.Siz]
+			f.Siz = colSize
+			if needValues && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+				f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
 			}
 			fixedColsFound++
-		} else if !col.IsFixed && col.VarColNum < len(varColOffsets)-1 {
-			colStart := varColOffsets[col.VarColNum]
+		} else if !isFixed && varNum < len(varColOffsets)-1 {
+			colStart := varColOffsets[varNum]
 			f.Start = rowStart + colStart
-			f.Siz = varColOffsets[col.VarColNum+1] - colStart
-			if f.Siz > 0 && rowStart+colStart+f.Siz <= len(mdb.pgBuf) {
-				f.Value = mdb.pgBuf[rowStart+colStart : rowStart+colStart+f.Siz]
+			f.Siz = varColOffsets[varNum+1] - colStart
+			if needValues && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+				f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
 			}
 		} else {
 			f.Start = 0
@@ -115,14 +217,14 @@ func (mdb *MdbHandle) CrackRow(table *MdbTableDef, rowStart, rowSize int) ([]Mdb
 }
 
 // crackRow4Offsets reads variable column offsets for Jet4 rows.
-func crackRow4Offsets(mdb *MdbHandle, rowEnd, bitmaskSz, rowVarCols int, offsets []int) {
+func crackRow4OffsetsIn(page []byte, rowEnd, bitmaskSz, rowVarCols int, offsets []int) {
 	for i := 0; i < rowVarCols+1; i++ {
-		offsets[i] = GetInt16(mdb.pgBuf[:], rowEnd-bitmaskSz-3-(i*2))
+		offsets[i] = GetInt16(page, rowEnd-bitmaskSz-3-(i*2))
 	}
 }
 
 // crackRow3Offsets reads variable column offsets for Jet3 rows.
-func crackRow3Offsets(mdb *MdbHandle, rowStart, rowEnd, bitmaskSz, rowVarCols int, offsets []int) {
+func crackRow3OffsetsIn(mdb *MdbHandle, page []byte, rowStart, rowEnd, bitmaskSz, rowVarCols int, offsets []int) {
 	rowLen := rowEnd - rowStart + 1
 	numJumps := (rowLen - 1) / 256
 	colPtr := rowEnd - bitmaskSz - numJumps - 1
@@ -142,10 +244,9 @@ func crackRow3Offsets(mdb *MdbHandle, rowStart, rowEnd, bitmaskSz, rowVarCols in
 
 	jumpsUsed := 0
 	for i := 0; i < rowVarCols+1; i++ {
-		for jumpsUsed < numJumps && i == int(mdb.pgBuf[rowEnd-bitmaskSz-jumpsUsed-1]) {
+		for jumpsUsed < numJumps && i == int(page[rowEnd-bitmaskSz-jumpsUsed-1]) {
 			jumpsUsed++
 		}
-		offsets[i] = int(mdb.pgBuf[colPtr-i]) + (jumpsUsed * 256)
+		offsets[i] = int(page[colPtr-i]) + (jumpsUsed * 256)
 	}
 }
-
