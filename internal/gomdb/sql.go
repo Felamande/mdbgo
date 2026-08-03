@@ -843,8 +843,10 @@ func (sql *SQL) mdbExecute() error {
 		return fmt.Errorf("gomdb: %w", err)
 	}
 
-	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("gomdb: %w", err)
+	if len(table.Columns) == 0 {
+		if err := mdb.ReadColumns(table); err != nil {
+			return fmt.Errorf("gomdb: %w", err)
+		}
 	}
 
 	// Handle COUNT(*) without WHERE

@@ -287,8 +287,10 @@ func (mdb *MdbHandle) DescribeTable(sql *SQL, tableName string) error {
 	}
 	defer mdb.FreeTableDef(table)
 
-	if err := mdb.ReadColumns(table); err != nil {
-		return fmt.Errorf("gomdb: describe table columns: %w", err)
+	if len(table.Columns) == 0 {
+		if err := mdb.ReadColumns(table); err != nil {
+			return fmt.Errorf("gomdb: describe table columns: %w", err)
+		}
 	}
 
 	ttable := mdb.CreateTempTable("#describe")

@@ -166,7 +166,7 @@ func (mdb *MdbHandle) ReadTableByName(name string, objType int) (*MdbTableDef, e
 
 	for _, entry := range mdb.Catalog {
 		if equalFold(entry.ObjectName, name) {
-			return mdb.ReadTable(entry)
+			return mdb.readTableCached(entry)
 		}
 	}
 
