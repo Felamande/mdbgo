@@ -441,10 +441,14 @@ func (fs *fastScan) enqueueErr(err error, prev <-chan struct{}) {
 }
 
 func (fs *fastScan) worker() {
+	valueMask := fs.sargMask
+	if valueMask == nil {
+		valueMask = fs.noValueMask
+	}
 	s := &decodeScratch{
 		fields:    make([]MdbField, len(fs.table.Columns)),
 		layouts:   buildCrackLayouts(fs.table),
-		valueMask: fs.sargMask,
+		valueMask: valueMask,
 	}
 	for t := range fs.tasks {
 		fs.processTask(t, s)
