@@ -119,73 +119,56 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 		layouts = nil
 	}
 	for i := 0; i < table.NumCols; i++ {
-		var (
-			col       *MdbColumn
-			layout    crackLayout
-			hasLayout bool
-		)
+		var lp *crackLayout
 		if layouts != nil {
-			layout = layouts[i]
-			hasLayout = true
-		} else {
-			col = table.Columns[i]
+			lp = &layouts[i]
 		}
 		f := &fields[i]
-		f.Value = nil
-		f.ColNum = i
-		if hasLayout {
-			f.IsFixed = layout.isFixed
-		} else {
-			f.IsFixed = col.IsFixed
+		if needValues {
+			f.Value = nil
+			f.ColNum = i
+			if lp != nil {
+				f.IsFixed = lp.isFixed
+			} else {
+				f.IsFixed = table.Columns[i].IsFixed
+			}
 		}
 
 		// Null bit check — uses col->col_num, NOT row_col_num. The mask
 		// offset is precomputed at column-definition time.
 		var byteNum int
 		var bitNum byte
-		if hasLayout {
-			byteNum = int(layout.nullByte)
-			bitNum = layout.nullBit
+		var isFixed bool
+		var varNum int
+		var colStart, colSize int
+		if lp != nil {
+			byteNum = int(lp.nullByte)
+			bitNum = lp.nullBit
+			isFixed = lp.isFixed
+			varNum = int(lp.varNum)
+			colStart = int(lp.fixedOffset)
+			colSize = int(lp.colSize)
 		} else {
+			col := table.Columns[i]
 			byteNum, bitNum = col.NullByte, byte(col.NullBit)
 			if !col.NullReady {
 				byteNum = col.ColNum / 8
 				bitNum = byte(1 << (col.ColNum % 8))
 			}
+			isFixed = col.IsFixed
+			varNum = col.VarColNum
+			colStart = col.FixedOffset
+			colSize = col.ColSize
 		}
 
 		if byteNum < len(nullMask) {
-			if nullMask[byteNum]&bitNum != 0 {
-				f.IsNull = false
-			} else {
-				f.IsNull = true
-			}
+			f.IsNull = nullMask[byteNum]&bitNum == 0
 		} else {
 			f.IsNull = true
 		}
 
-		isFixed := layout.isFixed
-		if !hasLayout {
-			isFixed = col.IsFixed
-		}
-		var varNum int
-		if !isFixed {
-			if hasLayout {
-				varNum = int(layout.varNum)
-			} else {
-				varNum = col.VarColNum
-			}
-		}
 		if isFixed && fixedColsFound < rowFixedCols {
-			var colStart int
-			var colSize int
-			if hasLayout {
-				colStart = int(layout.fixedOffset) + colCountSize
-				colSize = int(layout.colSize)
-			} else {
-				colStart = col.FixedOffset + colCountSize
-				colSize = col.ColSize
-			}
+			colStart += colCountSize
 			f.Start = rowStart + colStart
 			f.Siz = colSize
 			if needValues && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {

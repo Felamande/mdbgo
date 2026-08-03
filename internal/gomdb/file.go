@@ -19,7 +19,6 @@ var MaxInMemoryFileSize int64 = 128 << 20
 type MdbFile struct {
 	stream     io.ReaderAt
 	data       []byte // non-nil when the whole file is resident in memory
-	mapped     bool   // data is an mmap of the underlying file
 	size       int64
 	jetVersion int
 	dbKey      uint32
@@ -108,17 +107,8 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 	// read (including random memo-page lookups) into a memcpy. Fall back to
 	// stream reads on any I/O error; correctness does not depend on it.
 	if size > 0 && size <= MaxInMemoryFileSize {
-		var data []byte
-		var mapped bool
-		if f, ok := r.(*os.File); ok {
-			data, mapped = mapFileData(f, size)
-		}
-		if data == nil {
-			data = readAllExact(r, size)
-		}
-		if data != nil {
+		if data := readAllExact(r, size); data != nil {
 			mdb.f.data = data
-			mdb.f.mapped = mapped
 		}
 	}
 
@@ -278,10 +268,6 @@ func (mdb *MdbHandle) readPageInto(dst []byte, pg uint32) error {
 // Close closes the MDB handle and releases resources.
 func (mdb *MdbHandle) Close() error {
 	if mdb.f != nil {
-		if mdb.f.mapped && mdb.f.data != nil {
-			unmapFileData(mdb.f.data)
-			mdb.f.data = nil
-		}
 		if closer, ok := mdb.f.stream.(io.Closer); ok {
 			return closer.Close()
 		}
