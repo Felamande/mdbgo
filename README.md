@@ -12,11 +12,12 @@ mdbgo provides **two drivers** — a pure Go implementation and a CGo-based impl
 Both drivers are feature-equivalent and produce identical results — verified across 32,549 rows over 5 databases with 0 value differences.
 
 Large scans use a parallel fast path: unencrypted databases are read once
-into memory, page views are zero-copy, and row cracking, WHERE evaluation,
-and value formatting run across a small worker pool with ordered,
-backpressure-bounded batches. On the 27k-row `lm.mdb` workload the pure-Go
-driver scans all 44 columns of `MibTree` in ~40 ms (vs ~135 ms for the
-synchronous path), and a 2-column projection in ~10 ms.
+into memory (with a bounded cross-connection file cache), page views are
+zero-copy, and row cracking, WHERE evaluation, and value formatting run
+across a small worker pool with ordered, backpressure-bounded batches. On
+the 27k-row `lm.mdb` workload the pure-Go driver scans all 44 columns of
+`MibTree` in ~30 ms (vs ~135 ms for the synchronous path), and a 2-column
+projection in ~10 ms.
 
 > **Note:** Both drivers are read-only — querying existing Access databases only, no writes.
 
