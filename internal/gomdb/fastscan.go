@@ -25,7 +25,7 @@ var fastScanEnabled = true // test hook to force the synchronous path
 const (
 	fastScanMinRows  = 2048
 	fastScanMinCells = 20000
-	maxFastWorkers   = 10
+	maxFastWorkers   = 8
 	fastBatchRows    = 256
 	fastTaskRows     = 128
 	fastInFlight     = 8
