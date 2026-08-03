@@ -640,7 +640,7 @@ func formatTextValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s
 	if _, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
 		return string(src[2:])
 	}
-	return trimNUL(unicodeScratch(src, mdb.IsJet4(), s))
+	return trimNUL(unicodeScratchSlow(src, mdb.IsJet4(), s))
 }
 
 func formatOtherValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s *decodeScratch) any {

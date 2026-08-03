@@ -105,6 +105,16 @@ func appendUTF16Unit(dst []byte, pendingHigh *uint16, unit uint16) []byte {
 	return dst
 }
 
+// utf8C1 maps compressed bytes 0x80..0xFF to their fixed 2-byte UTF-8
+// encoding (U+0080..U+00FF), stored big-endian in a uint16.
+var utf8C1 = func() (t [128]uint16) {
+	for b := 0; b < 128; b++ {
+		u := 0x80 + b
+		t[b] = uint16(0xc0|(u>>6))<<8 | uint16(0x80|(u&0x3f))
+	}
+	return t
+}()
+
 func appendUTF16LE(dst, src []byte) []byte {
 	var pendingHigh uint16
 	return appendUTF16LEState(dst, src, &pendingHigh)
@@ -221,7 +231,8 @@ func appendCompressedUnicodeState(dst, src []byte, st *unicodeChunkState) []byte
 				continue
 			}
 			b := src[i]
-			dst = append(dst, 0xc0|(b>>6), 0x80|(b&0x3f))
+			enc := utf8C1[b-0x80]
+			dst = append(dst, byte(enc>>8), byte(enc))
 			i++
 			continue
 		}
@@ -302,6 +313,12 @@ func unicodeScratch(src []byte, isJet4 bool, s *decodeScratch) string {
 	if body, ok := unicodeFastPath(src, isJet4); ok {
 		return string(body)
 	}
+	return unicodeScratchSlow(src, isJet4, s)
+}
+
+// unicodeScratchSlow decodes src into the scratch buffer and copies it to a
+// string, skipping the fast-path check (callers that already ruled it out).
+func unicodeScratchSlow(src []byte, isJet4 bool, s *decodeScratch) string {
 	s.unicode = appendUnicodeUTF8(s.unicode[:0], src, isJet4)
 	return string(s.unicode)
 }
