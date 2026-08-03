@@ -230,10 +230,16 @@ func appendCompressedUnicodeState(dst, src []byte, st *unicodeChunkState) []byte
 				i++
 				continue
 			}
-			b := src[i]
-			enc := utf8C1[b-0x80]
-			dst = append(dst, byte(enc>>8), byte(enc))
-			i++
+			// Process the whole run of non-ASCII compressed bytes at once:
+			// each encodes to a fixed 2-byte UTF-8 sequence.
+			j := i
+			for j < len(src) && src[j] >= 0x80 {
+				j++
+			}
+			for ; i < j; i++ {
+				enc := utf8C1[src[i]-0x80]
+				dst = append(dst, byte(enc>>8), byte(enc))
+			}
 			continue
 		}
 		if i+1 >= len(src) {
