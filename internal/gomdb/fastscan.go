@@ -67,6 +67,8 @@ type rowField struct {
 
 type fastBatch struct {
 	rows        []fastRow
+	values      []any
+	fields      []rowField
 	n           int
 	eof         bool
 	err         error
@@ -76,18 +78,42 @@ type fastBatch struct {
 	ready       chan struct{}
 }
 
+// batchArena is the reusable backing storage of a fastBatch. Pooling it
+// across queries avoids reallocating row/value/field buffers for every scan.
+type batchArena struct {
+	rows   []fastRow
+	values []any
+	fields []rowField
+}
+
+var batchArenaPool sync.Pool
+
 func newFastBatch(nRows, nBound int) *fastBatch {
-	b := &fastBatch{
-		rows:  make([]fastRow, nRows),
-		ready: make(chan struct{}),
+	b := &fastBatch{ready: make(chan struct{})}
+	if a, ok := batchArenaPool.Get().(*batchArena); ok && cap(a.rows) >= nRows && cap(a.values) >= nRows*nBound {
+		b.rows = a.rows[:nRows]
+		b.values = a.values[:nRows*nBound]
+		b.fields = a.fields[:nRows*nBound]
+	} else {
+		b.rows = make([]fastRow, nRows)
+		b.values = make([]any, nRows*nBound)
+		b.fields = make([]rowField, nRows*nBound)
 	}
-	values := make([]any, nRows*nBound)
-	fields := make([]rowField, nRows*nBound)
 	for i := range b.rows {
-		b.rows[i].values = values[i*nBound : (i+1)*nBound]
-		b.rows[i].fields = fields[i*nBound : (i+1)*nBound]
+		b.rows[i].values = b.values[i*nBound : (i+1)*nBound]
+		b.rows[i].fields = b.fields[i*nBound : (i+1)*nBound]
 	}
 	return b
+}
+
+func (b *fastBatch) recycle() {
+	if b.rows == nil {
+		return
+	}
+	batchArenaPool.Put(&batchArena{rows: b.rows, values: b.values, fields: b.fields})
+	b.rows = nil
+	b.values = nil
+	b.fields = nil
 }
 
 func (b *fastBatch) markReady() {
@@ -226,6 +252,25 @@ func (fs *fastScan) close() {
 	fs.cancel()
 	fs.producerWG.Wait()
 	fs.workerWG.Wait()
+	// Return any pooled or queued-but-unconsumed arenas to the global pool;
+	// all workers have stopped, so the batches are no longer in use.
+	for {
+		select {
+		case b := <-fs.pool:
+			b.recycle()
+		default:
+			goto drained
+		}
+	}
+drained:
+	for {
+		select {
+		case b := <-fs.batches:
+			b.recycle()
+		default:
+			return
+		}
+	}
 }
 
 // produce walks the table's data pages and dispatches row ranges to workers.
@@ -317,6 +362,7 @@ func (fs *fastScan) releaseBatch(b *fastBatch) {
 	select {
 	case fs.pool <- b:
 	default:
+		b.recycle()
 	}
 }
 

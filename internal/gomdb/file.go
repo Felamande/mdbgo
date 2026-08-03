@@ -75,11 +75,11 @@ func OpenMDB(filename string) (*MdbHandle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gomdb: unable to open file %s: %w", filename, err)
 	}
-	return openMDBFromReader(f)
+	return openMDBFromReader(filename, f)
 }
 
 // openMDBFromReader creates an MdbHandle from an io.ReaderAt.
-func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
+func openMDBFromReader(filename string, r io.ReaderAt) (*MdbHandle, error) {
 	mdb := &MdbHandle{
 		bindSize:     BindSize,
 		dateFmt:      "%x %X",
@@ -107,7 +107,16 @@ func openMDBFromReader(r io.ReaderAt) (*MdbHandle, error) {
 	// read (including random memo-page lookups) into a memcpy. Fall back to
 	// stream reads on any I/O error; correctness does not depend on it.
 	if size > 0 && size <= MaxInMemoryFileSize {
-		if data := readAllExact(r, size); data != nil {
+		var data []byte
+		if filename != "" {
+			if f, ok := r.(*os.File); ok {
+				data = loadCachedFileData(filename, f, size)
+			}
+		}
+		if data == nil {
+			data = readAllExact(r, size)
+		}
+		if data != nil {
 			mdb.f.data = data
 		}
 	}
