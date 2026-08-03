@@ -256,31 +256,7 @@ func describeTable(t *testing.T, db *sql.DB, table, label string) []colDef {
 
 func queryAll(t *testing.T, db *sql.DB, table, label string) ([]string, [][]interface{}) {
 	t.Helper()
-	rows, err := db.Query(fmt.Sprintf("SELECT * FROM [%s]", table))
-	if err != nil {
-		t.Fatalf("%s SELECT %s: %v", label, table, err)
-	}
-	defer rows.Close()
-	colNames, err := rows.Columns()
-	if err != nil {
-		t.Fatalf("%s SELECT %s columns: %v", label, table, err)
-	}
-	var result [][]interface{}
-	for rows.Next() {
-		vals := make([]interface{}, len(colNames))
-		ptrs := make([]interface{}, len(colNames))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			t.Fatalf("%s SELECT %s scan: %v", label, table, err)
-		}
-		result = append(result, vals)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("%s SELECT %s: %v", label, table, err)
-	}
-	return colNames, result
+	return querySQL(t, db, fmt.Sprintf("SELECT * FROM [%s]", table), label)
 }
 
 func sortedKeys(m map[string]bool) []string {
