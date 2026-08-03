@@ -21,9 +21,10 @@ type cachedFile struct {
 }
 
 var (
-	fileCacheMu    sync.Mutex
-	fileCache      = make(map[string]*cachedFile)
-	fileCacheBytes int64
+	fileCacheMu      sync.Mutex
+	fileCache        = make(map[string]*cachedFile)
+	fileCacheBytes   int64
+	fileCacheLoading = make(map[string]chan struct{})
 )
 
 // loadCachedFileData returns the file contents, reading and caching them on a
@@ -41,15 +42,35 @@ func loadCachedFileData(path string, f *os.File, size, mtime int64) []byte {
 		fileCacheMu.Unlock()
 		return data
 	}
+	if ch, loading := fileCacheLoading[path]; loading {
+		fileCacheMu.Unlock()
+		<-ch
+		fileCacheMu.Lock()
+		if e, ok := fileCache[path]; ok && e.size == size && e.mtime == mtime {
+			data := e.data
+			fileCacheMu.Unlock()
+			return data
+		}
+		fileCacheMu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	fileCacheLoading[path] = ch
 	fileCacheMu.Unlock()
 
 	data := readAllExact(f, size)
 	if data == nil {
+		fileCacheMu.Lock()
+		delete(fileCacheLoading, path)
+		close(ch)
+		fileCacheMu.Unlock()
 		return nil
 	}
 
 	fileCacheMu.Lock()
 	defer fileCacheMu.Unlock()
+	delete(fileCacheLoading, path)
+	close(ch)
 	if e, ok := fileCache[path]; ok && e.size == size && e.mtime == mtime {
 		e.lastUsed = now
 		return e.data
