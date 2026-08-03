@@ -6,9 +6,8 @@ type rc4Key struct {
 	x, y  byte
 }
 
-// rc4SetKey initializes the RC4 key state from the provided key data.
-func rc4SetKey(key []byte) *rc4Key {
-	k := &rc4Key{}
+// rc4InitKey initializes the RC4 key state from the provided key data.
+func rc4InitKey(k *rc4Key, key []byte) {
 	for i := 0; i < 256; i++ {
 		k.state[i] = byte(i)
 	}
@@ -18,7 +17,6 @@ func rc4SetKey(key []byte) *rc4Key {
 		k.state[counter], k.state[index2] = k.state[index2], k.state[counter]
 		index1 = (index1 + 1) % byte(len(key))
 	}
-	return k
 }
 
 // rc4Crypt performs RC4 encryption/decryption in-place on buf.
@@ -37,6 +35,7 @@ func (k *rc4Key) rc4Crypt(buf []byte) {
 // rc4Decrypt is a convenience function that decrypts a buffer using RC4 with the given key.
 // It performs the decryption in-place.
 func rc4Decrypt(key, buf []byte) {
-	k := rc4SetKey(key)
+	var k rc4Key
+	rc4InitKey(&k, key)
 	k.rc4Crypt(buf)
 }

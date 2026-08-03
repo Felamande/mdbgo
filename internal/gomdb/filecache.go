@@ -28,15 +28,10 @@ var (
 
 // loadCachedFileData returns the file contents, reading and caching them on a
 // miss. The returned slice is read-only and shared between handles.
-func loadCachedFileData(path string, f *os.File, size int64) []byte {
+func loadCachedFileData(path string, f *os.File, size, mtime int64) []byte {
 	if path == "" || size <= 0 || FileCacheMaxBytes <= 0 {
 		return nil
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return nil
-	}
-	mtime := fi.ModTime().UnixNano()
 	now := time.Now().UnixNano()
 
 	fileCacheMu.Lock()

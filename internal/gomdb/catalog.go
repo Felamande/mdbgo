@@ -89,15 +89,10 @@ func (mdb *MdbHandle) catalogFileInfo() (path string, size, mtime int64, ok bool
 	if mdb.f == nil || mdb.f.path == "" {
 		return "", 0, 0, false
 	}
-	f, isFile := mdb.f.stream.(*os.File)
-	if !isFile {
+	if _, isFile := mdb.f.stream.(*os.File); !isFile {
 		return "", 0, 0, false
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return "", 0, 0, false
-	}
-	return mdb.f.path, fi.Size(), fi.ModTime().UnixNano(), true
+	return mdb.f.path, mdb.f.size, mdb.f.mtime, true
 }
 
 // buildCatalogEntries reads MSysObjects and parses every row without the

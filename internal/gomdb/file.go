@@ -21,6 +21,7 @@ type MdbFile struct {
 	path       string
 	data       []byte // non-nil when the whole file is resident in memory
 	size       int64
+	mtime      int64
 	jetVersion int
 	dbKey      uint32
 	codePage   uint16
@@ -49,9 +50,6 @@ type MdbHandle struct {
 	// Catalog
 	numCatalog int
 	Catalog    []*CatalogEntry
-
-	// Properties
-	props map[string]string
 }
 
 // CatalogEntry represents an entry in the MSysObjects catalog table.
@@ -86,7 +84,6 @@ func openMDBFromReader(filename string, r io.ReaderAt) (*MdbHandle, error) {
 		dateFmt:      "%x %X",
 		shortDateFmt: "%x",
 		Catalog:      make([]*CatalogEntry, 0),
-		props:        make(map[string]string),
 	}
 	mdb.pgBuf = mdb.pgArr[:]
 	mdb.altPgBuf = mdb.altPgArr[:]
@@ -94,16 +91,23 @@ func openMDBFromReader(filename string, r io.ReaderAt) (*MdbHandle, error) {
 	// Bootstrap with Jet3 constants; will be corrected after reading page 0
 	mdb.fmt = &Jet3FormatConstants
 
-	size, err := readerSize(r)
-	if err != nil {
-		return nil, fmt.Errorf("gomdb: unable to determine file size: %w", err)
+	var size, mtime int64
+	if f, ok := r.(*os.File); ok {
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("gomdb: unable to stat file: %w", err)
+		}
+		size = fi.Size()
+		mtime = fi.ModTime().UnixNano()
+	} else {
+		var err error
+		size, err = readerSize(r)
+		if err != nil {
+			return nil, fmt.Errorf("gomdb: unable to determine file size: %w", err)
+		}
 	}
 
-	mdb.f = &MdbFile{
-		stream: r,
-		path:   filename,
-		size:   size,
-	}
+	mdb.f = &MdbFile{stream: r, path: filename, size: size, mtime: mtime}
 
 	// Load the file into memory when small enough. This turns every page
 	// read (including random memo-page lookups) into a memcpy. Fall back to
@@ -112,7 +116,7 @@ func openMDBFromReader(filename string, r io.ReaderAt) (*MdbHandle, error) {
 		var data []byte
 		if filename != "" {
 			if f, ok := r.(*os.File); ok {
-				data = loadCachedFileData(filename, f, size)
+				data = loadCachedFileData(filename, f, size, mtime)
 			}
 		}
 		if data == nil {

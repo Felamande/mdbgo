@@ -21,7 +21,11 @@ func TestFileCacheSharesAndInvalidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data1 := loadCachedFileData(path, f, 5)
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data1 := loadCachedFileData(path, f, 5, fi.ModTime().UnixNano())
 	f.Close()
 	if string(data1) != "hello" {
 		t.Fatalf("first load = %q", data1)
@@ -31,7 +35,11 @@ func TestFileCacheSharesAndInvalidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data2 := loadCachedFileData(path, f, 5)
+	fi, err = f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data2 := loadCachedFileData(path, f, 5, fi.ModTime().UnixNano())
 	f.Close()
 	if len(data1) == 0 || &data1[0] != &data2[0] {
 		t.Fatal("second open did not share the cached buffer")
@@ -49,7 +57,11 @@ func TestFileCacheSharesAndInvalidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data3 := loadCachedFileData(path, f, 6)
+	fi, err = f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data3 := loadCachedFileData(path, f, 6, fi.ModTime().UnixNano())
 	f.Close()
 	if string(data3) != "world!" {
 		t.Fatalf("modified load = %q", data3)
@@ -72,7 +84,7 @@ func TestFileCacheDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data1 := loadCachedFileData(path, f, 5)
+	data1 := loadCachedFileData(path, f, 5, 0)
 	f.Close()
 	if data1 != nil {
 		t.Fatal("cache disabled but loadCachedFileData returned data")
