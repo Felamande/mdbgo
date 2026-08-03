@@ -450,6 +450,13 @@ func (fs *fastScan) worker() {
 		layouts:   buildCrackLayouts(fs.table),
 		valueMask: valueMask,
 	}
+	for _, i := range fs.crackCols {
+		if s.layouts[i].isFixed {
+			s.fixedCols = append(s.fixedCols, i)
+		} else {
+			s.varCols = append(s.varCols, i)
+		}
+	}
 	for t := range fs.tasks {
 		fs.processTask(t, s)
 		t.batch.remaining.Add(-1)

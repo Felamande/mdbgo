@@ -12,6 +12,8 @@ type decodeScratch struct {
 	unicode    []byte
 	layouts    []crackLayout
 	valueMask  []bool
+	fixedCols  []int
+	varCols    []int
 }
 
 // crackLayout is the per-column data needed to crack rows, packed into a
@@ -130,10 +132,23 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 	}
 
 	if cols != nil {
+		if layouts != nil && s.fixedCols != nil {
+			// Split loops: fixed columns first, then variable columns, so the
+			// per-column branch on fixed/variable disappears from the hot path.
+			for _, i := range s.fixedCols {
+				lp := &layouts[i]
+				crackColumnFast(&fields[i], lp, page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
+			}
+			for _, i := range s.varCols {
+				lp := &layouts[i]
+				crackColumnFast(&fields[i], lp, page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
+			}
+			return fields, nil
+		}
 		for _, i := range cols {
-			var lp *crackLayout
 			if layouts != nil {
-				lp = &layouts[i]
+				lp := &layouts[i]
+				crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
 			} else {
 				col := table.Columns[i]
 				tmp := crackLayout{
@@ -145,9 +160,8 @@ func crackRowInto(mdb *MdbHandle, table *MdbTableDef, page []byte, rowStart, row
 					varNum:      int32(col.VarColNum),
 					fixedBefore: int32(fixedColsBefore(table.Columns, i)),
 				}
-				lp = &tmp
+				crackColumnInto(&fields[i], &tmp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, int(tmp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
 			}
-			crackColumnInto(&fields[i], lp, table.Columns[i], page, rowStart, rowSize, rowFixedCols, int(lp.fixedBefore), varColOffsets, colCountSize, nullMask, i, needsValue(valueMask, i))
 		}
 		return fields, nil
 	}
@@ -234,6 +248,56 @@ func crackColumnInto(f *MdbField, lp *crackLayout, col *MdbColumn, page []byte, 
 	}
 
 	// Validate field bounds
+	if f.Start+f.Siz > rowStart+rowSize {
+		f.Start = rowStart
+		f.Siz = 0
+	}
+}
+
+// crackColumnFast is the layout-only form of crackColumnInto used by the
+// projection-aware fast path, where layouts are always available. It avoids
+// the synchronous fallback branches.
+func crackColumnFast(f *MdbField, lp *crackLayout, page []byte, rowStart, rowSize, rowFixedCols, fixedCount int, varColOffsets []int, colCountSize int, nullMask []byte, colNum int, needValue bool) {
+	isFixed := lp.isFixed
+	byteNum := int(lp.nullByte)
+	bitNum := lp.nullBit
+	varNum := int(lp.varNum)
+	colStart := int(lp.fixedOffset)
+	colSize := int(lp.colSize)
+
+	if needValue {
+		f.Value = nil
+		f.ColNum = colNum
+		f.IsFixed = isFixed
+	}
+
+	if byteNum < len(nullMask) {
+		f.IsNull = nullMask[byteNum]&bitNum == 0
+	} else {
+		f.IsNull = true
+	}
+
+	if isFixed && fixedCount < rowFixedCols {
+		colStart += colCountSize
+		f.Start = rowStart + colStart
+		f.Siz = colSize
+		if needValue && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+			f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
+		}
+	} else if !isFixed && varNum < len(varColOffsets)-1 {
+		colStart = varColOffsets[varNum]
+		f.Start = rowStart + colStart
+		f.Siz = varColOffsets[varNum+1] - colStart
+		if needValue && f.Siz > 0 && rowStart+colStart+f.Siz <= len(page) {
+			f.Value = page[rowStart+colStart : rowStart+colStart+f.Siz]
+		}
+	} else {
+		f.Start = 0
+		f.Value = nil
+		f.Siz = 0
+		f.IsNull = true
+	}
+
 	if f.Start+f.Siz > rowStart+rowSize {
 		f.Start = rowStart
 		f.Siz = 0
