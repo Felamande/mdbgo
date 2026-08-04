@@ -56,7 +56,7 @@ func BenchmarkLmWhere(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		db := lmDB(b)
-		scanAll(b, db, "SELECT * FROM [MibTree] WHERE CmdID > 10000")
+		scanAll(b, db, "SELECT * FROM [MibTree] WHERE ConsistentFileInfo > 0")
 		db.Close()
 	}
 }
