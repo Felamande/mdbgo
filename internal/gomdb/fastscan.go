@@ -639,10 +639,12 @@ func formatTextValue(mdb *MdbHandle, col *MdbColumn, page []byte, f *MdbField, s
 		return nil
 	}
 	// Fast-path text is pure ASCII and therefore NUL-free; skip the trimNUL
-	// pass that the generic string path performs.
+	// pass that the generic string path performs. The body is borrowed
+	// zero-copy: it aliases the immutable resident file data, which the GC
+	// keeps alive through the returned string.
 	src := page[f.Start : f.Start+f.Siz]
-	if _, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
-		return string(src[2:])
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return borrowString(body)
 	}
 	return trimNUL(unicodeScratchSlow(src, mdb.IsJet4(), s))
 }

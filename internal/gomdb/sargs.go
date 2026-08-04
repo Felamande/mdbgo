@@ -196,7 +196,7 @@ func testSargScratch(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbF
 // testSargStringIn evaluates a string sarg with caller-owned scratch.
 func testSargStringIn(mdb *MdbHandle, node *SargNode, src []byte, s *decodeScratch) bool {
 	if node.Op == OpILike {
-		return testString(node, unicodeScratch(src, mdb.IsJet4(), s))
+		return testString(node, unicodeBorrow(src, mdb.IsJet4(), s))
 	}
 	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
 		return testStringBytes(node, body)

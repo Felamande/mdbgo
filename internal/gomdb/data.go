@@ -274,7 +274,7 @@ func colToStringIn(mdb *MdbHandle, col *MdbColumn, field *MdbField, page []byte,
 
 	case TypeText:
 		if s != nil {
-			return unicodeScratch(page[field.Start:field.Start+field.Siz], mdb.IsJet4(), s)
+			return unicodeBorrow(page[field.Start:field.Start+field.Siz], mdb.IsJet4(), s)
 		}
 		return mdb.unicodeToUTF8(page[field.Start : field.Start+field.Siz])
 
@@ -361,7 +361,7 @@ func memoToStringIn(mdb *MdbHandle, page []byte, start, size int, s *decodeScrat
 
 	if memoLen&0x80000000 != 0 {
 		// Inline memo
-		return unicodeScratch(page[start+MemoOverhead:start+size], mdb.IsJet4(), s)
+		return unicodeBorrow(page[start+MemoOverhead:start+size], mdb.IsJet4(), s)
 	} else if memoLen&0x40000000 != 0 {
 		// Single-page memo
 		pgRow := GetInt32(page, start+4)
@@ -369,7 +369,7 @@ func memoToStringIn(mdb *MdbHandle, page []byte, start, size int, s *decodeScrat
 		if !ok {
 			return ""
 		}
-		return unicodeScratch(buf[rowStart:rowStart+length], mdb.IsJet4(), s)
+		return unicodeBorrow(buf[rowStart:rowStart+length], mdb.IsJet4(), s)
 	} else if (memoLen & 0xFF000000) == 0 {
 		// Multi-page memo: decode the page chain as one continuing stream
 		// directly into the UTF-8 scratch, skipping a raw concatenation pass.

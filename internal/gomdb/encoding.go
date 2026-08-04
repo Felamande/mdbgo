@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"unicode/utf16"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // unicodeFastPath reports whether src is a Jet4 fully-compressed ASCII string,
@@ -355,6 +356,32 @@ func unicodeScratch(src []byte, isJet4 bool, s *decodeScratch) string {
 		return string(body)
 	}
 	return unicodeScratchSlow(src, isJet4, s)
+}
+
+// unicodeBorrow converts src to a UTF-8 string like unicodeScratch, but
+// returns a zero-copy view of the body when the fully-compressed ASCII fast
+// path applies. The caller must guarantee that src aliases immutable memory
+// that is never reused (resident file data in the fast-scan path); Go's GC
+// keeps the backing array alive through the returned string. Non-ASCII and
+// non-fast-path inputs fall back to a scratch-backed copy.
+func unicodeBorrow(src []byte, isJet4 bool, s *decodeScratch) string {
+	if len(src) == 0 {
+		return ""
+	}
+	if body, ok := unicodeFastPath(src, isJet4); ok {
+		return borrowString(body)
+	}
+	return unicodeScratchSlow(src, isJet4, s)
+}
+
+// borrowString returns a zero-copy string view of b. b must alias immutable,
+// non-reused memory for the lifetime of the string; the GC keeps the backing
+// array alive through the returned string (strings are pointer-scanned).
+func borrowString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 // unicodeScratchSlow decodes src into the scratch buffer and copies it to a
