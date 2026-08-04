@@ -16,6 +16,9 @@ func unicodeFastPath(src []byte, isJet4 bool) ([]byte, bool) {
 		return nil, false
 	}
 	body := src[2:]
+	if simdASCIIEnabled && len(body) >= 32 {
+		return body, simdASCIIValid(body)
+	}
 	// Check eight bytes at a time: no byte may have the high bit set (>= 0x80)
 	// and no byte may be zero. The second test is the classic haszero word
 	// trick; it borrows from the top bit, which is already excluded above.
@@ -131,9 +134,13 @@ func appendUTF16LEState(dst, src []byte, pendingHigh *uint16) []byte {
 			j := asciiUTF16RunLen(src, i)
 			// Copy the low bytes of the ASCII units.
 			low := src[i:j:j]
-			dst = append(dst, low[0])
-			for k := 2; k < len(low); k += 2 {
-				dst = append(dst, low[k])
+			if simdASCIIEnabled && len(low) >= 32 {
+				dst = simdPackUTF16Low(dst, low)
+			} else {
+				dst = append(dst, low[0])
+				for k := 2; k < len(low); k += 2 {
+					dst = append(dst, low[k])
+				}
 			}
 			i = j
 			continue
@@ -152,6 +159,9 @@ func appendUTF16LEState(dst, src []byte, pendingHigh *uint16) []byte {
 // asciiUTF16RunLen returns the end of a run of UTF-16LE units whose high byte
 // is 0 and whose low byte is below RuneSelf, checked eight bytes at a time.
 func asciiUTF16RunLen(src []byte, start int) int {
+	if simdASCIIEnabled && len(src)-start >= 32 {
+		return simdUTF16RunLen(src, start)
+	}
 	i := start
 	for i+8 <= len(src) {
 		w := binary.LittleEndian.Uint64(src[i:])
@@ -171,6 +181,9 @@ func asciiUTF16RunLen(src []byte, start int) int {
 // asciiRunLen returns the end of a run of bytes that are neither zero nor
 // >= RuneSelf, checked eight bytes at a time.
 func asciiRunLen(src []byte, start int) int {
+	if simdASCIIEnabled && len(src)-start >= 32 {
+		return simdASCIIRunLen(src, start)
+	}
 	i := start
 	for i+8 <= len(src) {
 		w := binary.LittleEndian.Uint64(src[i:])
@@ -236,10 +249,15 @@ func appendCompressedUnicodeState(dst, src []byte, st *unicodeChunkState) []byte
 			for j < len(src) && src[j] >= 0x80 {
 				j++
 			}
-			for ; i < j; i++ {
-				enc := utf8C1[src[i]-0x80]
-				dst = append(dst, byte(enc>>8), byte(enc))
+			if simdASCIIEnabled && j-i >= 8 {
+				dst = simdExpandC1(dst, src[i:j])
+			} else {
+				for ; i < j; i++ {
+					enc := utf8C1[src[i]-0x80]
+					dst = append(dst, byte(enc>>8), byte(enc))
+				}
 			}
+			i = j
 			continue
 		}
 		if i+1 >= len(src) {
@@ -257,14 +275,31 @@ func appendCompressedUnicodeState(dst, src []byte, st *unicodeChunkState) []byte
 }
 
 func appendLatin1UTF8(dst, src []byte) []byte {
-	for _, b := range src {
-		if b < utf8.RuneSelf {
-			dst = append(dst, b)
-		} else {
-			dst = utf8.AppendRune(dst, rune(b))
+	i := 0
+	for i < len(src) {
+		if src[i] < utf8.RuneSelf {
+			j := latin1RunLen(src, i)
+			dst = append(dst, src[i:j]...)
+			i = j
+			continue
 		}
+		dst = utf8.AppendRune(dst, rune(src[i]))
+		i++
 	}
 	return dst
+}
+
+// latin1RunLen returns the length of the run of bytes below RuneSelf (zeros
+// are allowed) starting at src[start:].
+func latin1RunLen(src []byte, start int) int {
+	if simdASCIIEnabled && len(src)-start >= 32 {
+		return simdLatin1RunLen(src, start)
+	}
+	i := start
+	for i < len(src) && src[i] < utf8.RuneSelf {
+		i++
+	}
+	return i
 }
 
 func appendUnicodeUTF8(dst, src []byte, isJet4 bool) []byte {
@@ -408,6 +443,10 @@ func ASCIItoUCS2(src string) []byte {
 		return nil
 	}
 	dst := make([]byte, len(src)*2)
+	if simdASCIIEnabled && len(src) >= 8 {
+		simdWidenASCII(src, dst)
+		return dst
+	}
 	for i := 0; i < len(src); i++ {
 		dst[i*2] = src[i]
 	}

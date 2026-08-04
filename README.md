@@ -19,6 +19,16 @@ the 27k-row `lm.mdb` workload the pure-Go driver scans all 44 columns of
 `MibTree` in ~30 ms (vs ~135 ms for the synchronous path), and a 2-column
 projection in ~10 ms.
 
+The decode kernels (compressed-ASCII validation, UTF-16 ASCII packing, and
+compressed-byte expansion) can additionally be built with Go 1.26's
+experimental `simd/archsimd` package: build with `GOEXPERIMENT=simd` and an
+AVX2-capable CPU to run them as vectorized kernels (roughly 2.5-8x faster
+than the scalar loops; the exact figures depend on the workload). Without
+the experiment flag, or on older CPUs, the scalar kernels are used
+automatically. Note that the end-to-end scan time is dominated by value
+allocation and interface boxing, so the SIMD gain is visible in the decode
+step rather than in the full `database/sql` scan.
+
 > **Note:** Both drivers are read-only — querying existing Access databases only, no writes.
 
 ## Features
