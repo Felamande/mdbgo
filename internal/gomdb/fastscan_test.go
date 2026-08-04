@@ -61,6 +61,8 @@ func TestFastScanMatchesSync(t *testing.T) {
 		"SELECT * FROM [MibTree] WHERE CmdID > 10000",
 		"SELECT OID, MIBName FROM [MibTree] WHERE MIBName LIKE 'sys%'",
 		"SELECT OID, MIBName FROM [MibTree] WHERE IsLeaf = 1 AND ExcelLine > 0",
+		"SELECT OID FROM [MibTree] WHERE OID IN ('1.2.1.1.1.1','1.2.1.1.1','1.2.1.1','1.2.1')",
+		"SELECT TOP 500 OID FROM [MibTree]",
 		"SELECT * FROM [MibTree] LIMIT 500",
 	}
 	for _, query := range queries {

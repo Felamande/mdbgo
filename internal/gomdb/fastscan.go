@@ -38,6 +38,10 @@ func canFastScan(mdb *MdbHandle, sql *SQL) bool {
 	if sql.CurTable.IsTempTable || sql.NumColumns == 0 || len(sql.BoundColumns) != sql.NumColumns {
 		return false
 	}
+	// ORDER BY materializes and sorts the result synchronously.
+	if len(sql.OrderBy) > 0 {
+		return false
+	}
 	if sql.CurTable.Strategy != TableScan {
 		return false
 	}

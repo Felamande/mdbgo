@@ -37,7 +37,7 @@ step rather than in the full `database/sql` scan.
 - Full [sqlx](https://github.com/jmoiron/sqlx) compatibility (`StructScan`, `Select`, `Get`, `Named` queries)
 - Reads MDB (Jet 3/4) and ACCDB files
 - No dependency on Microsoft Access, ACE/Jet OLE DB, or ODBC
-- SQL queries: `SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `LIST TABLES`, `DESCRIBE TABLE`
+- SQL queries: `SELECT` (with `TOP N [PERCENT]`), `WHERE` (including `IN` and `LIKE`/`ILIKE`), `ORDER BY` (column or `Len(column)`, `ASC`/`DESC`), `LIMIT`, `LIST TABLES`, `DESCRIBE TABLE`
 - Parameterized queries with `?` placeholders
 - All 15 Access column types with `sql.Null*` support
 - Full column metadata (`ColumnTypeDatabaseTypeName`, `ColumnTypeLength`, `ColumnTypeScanType`)
@@ -92,6 +92,16 @@ type User struct {
 }
 var users []User
 sqlxDB.Select(&users, "SELECT * FROM Users")
+```
+
+`WHERE ... IN` and `ORDER BY` are pure-Go (gomdb) features; the CGo cmdb
+driver's SQL grammar does not support them. Dotted values such as OIDs must
+be quoted in `IN` lists:
+
+```go
+rows, _ := db.Query(
+    "SELECT TOP 1 * FROM MibTree WHERE OID IN ('1.2.1.1.1.1','1.2.1.1.1','1.2.1.1','1.2.1') ORDER BY Len(OID) DESC",
+)
 ```
 
 ### Listing tables

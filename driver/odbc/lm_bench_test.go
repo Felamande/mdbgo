@@ -77,6 +77,14 @@ func BenchmarkOdbcLmWhere(b *testing.B) {
 		db.Close()
 	}
 }
+func BenchmarkLmWhereOID(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		db := lmDB(b)
+		scanAll(b, db, "SELECT * FROM [MibTree] WHERE OID = '2.7.24.18.1.3'")
+		db.Close()
+	}
+}
 
 // BenchmarkOdbcLmWhereParallel runs the same filtered scan concurrently:
 // every parallel worker opens its own ODBC connection per iteration, exactly
@@ -90,4 +98,22 @@ func BenchmarkOdbcLmWhereParallel(b *testing.B) {
 			db.Close()
 		}
 	})
+}
+
+func BenchmarkLmWhereOIDIn(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		db := lmDB(b)
+		scanAll(b, db, "SELECT OID FROM [MibTree] WHERE OID IN ('2.4.2.2.1.1.1.0.0.2.0','2.4.2.2.1.1.1.0.0.2','2.4.2.2.1.1.1.0.0','2.4.2.2.1.1.1.0','2.4.2.2.1.1.1','2.4.2.2.1.1','2.4.2.2.1','2.4.2.2')")
+		db.Close()
+	}
+}
+
+func BenchmarkLmOrderByTop(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		db := lmDB(b)
+		scanAll(b, db, "SELECT TOP 1 * FROM [MibTree] WHERE OID IN ('2.4.2.2.1.1.1.0.0.2.0','2.4.2.2.1.1.1.0.0.2','2.4.2.2.1.1.1.0.0','2.4.2.2.1.1.1.0','2.4.2.2.1.1.1','2.4.2.2.1.1','2.4.2.2.1','2.4.2.2') ORDER BY Len(OID) DESC")
+		db.Close()
+	}
 }

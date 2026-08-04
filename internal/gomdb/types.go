@@ -74,6 +74,7 @@ const (
 	OpNotNull = 11
 	OpILike   = 12
 	OpNEQ     = 13
+	OpIn      = 14
 )
 
 // Index-related
@@ -231,7 +232,8 @@ func IsLogicalOp(op int) bool {
 // IsRelationalOp returns true if the operator is a comparison operator.
 func IsRelationalOp(op int) bool {
 	return op == OpEqual || op == OpGT || op == OpLT || op == OpGTEQ || op == OpLTEQ ||
-		op == OpNEQ || op == OpLike || op == OpILike || op == OpIsNull || op == OpNotNull
+		op == OpNEQ || op == OpLike || op == OpILike || op == OpIsNull || op == OpNotNull ||
+		op == OpIn
 }
 
 // ColTypeName returns the Access type name for a column type constant.

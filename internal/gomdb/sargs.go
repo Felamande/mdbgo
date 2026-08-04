@@ -2,7 +2,10 @@ package gomdb
 
 import (
 	"bytes"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // SargNode is a node in the search argument tree (WHERE clause).
@@ -19,7 +22,19 @@ type SargNode struct {
 	ilikePattern    string
 	ilikePatternSet bool
 	patternBytes    []byte // precomputed []byte form of Value.S for string sargs
+
+	// IN list state, precomputed once per query by resolveInValues so the
+	// per-row evaluator never allocates or re-parses literals.
+	InValues    []MdbAny // typed elements: I for int/bool, D for float/date, S for text/memo
+	InElemTypes []int    // parallel literal origin: TypeText (quoted), TypeDouble (number), TypeInt (TRUE/FALSE)
+	InBytes     [][]byte // UTF-8 forms for text IN lists; sorted+deduped when inSorted
+	inSorted    bool     // InValues/InBytes sorted, evaluate with binary search
 }
+
+// inLinearSearchMax is the IN list size threshold. Larger lists are sorted
+// and deduplicated once at resolve time and evaluated with binary search;
+// smaller lists use a cache-friendly linear scan.
+const inLinearSearchMax = 8
 
 // TestSargs evaluates the sarg tree against the provided fields.
 // Returns true if the row passes all conditions.
@@ -107,6 +122,9 @@ func testSargScratch(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbF
 	if node.Op == OpNotNull {
 		return !field.IsNull
 	}
+	if node.Op == OpIn {
+		return testSargIn(mdb, col, node, field, page, s)
+	}
 
 	switch col.ColType {
 	case TypeBool:
@@ -191,6 +209,288 @@ func testSargScratch(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbF
 	default:
 		return true
 	}
+}
+
+// testSargIn evaluates an IN predicate against a single field. Typed element
+// lists are precomputed, so the hot path is a tight loop (or binary search)
+// over plain values with no allocation.
+func testSargIn(mdb *MdbHandle, col *MdbColumn, node *SargNode, field *MdbField, page []byte, s *decodeScratch) bool {
+	switch col.ColType {
+	case TypeBool:
+		// Mirrors the existing bool comparison semantics: a null bool field
+		// compares as 0 (FALSE).
+		val := 0
+		if !field.IsNull {
+			val = 1
+		}
+		return testIntList(node, val)
+
+	case TypeByte:
+		if field.IsNull || field.Siz < 1 {
+			return false
+		}
+		return testIntList(node, int(field.Value[0]))
+
+	case TypeInt:
+		if field.IsNull || field.Siz < 2 {
+			return false
+		}
+		return testIntList(node, GetInt16(field.Value, 0))
+
+	case TypeLongInt, TypeComplex:
+		if field.IsNull || field.Siz < 4 {
+			return false
+		}
+		return testIntList(node, GetInt32(field.Value, 0))
+
+	case TypeFloat:
+		if field.IsNull || field.Siz < 4 {
+			return false
+		}
+		return testDoubleList(node, float64(GetSingle(field.Value, 0)))
+
+	case TypeDouble:
+		if field.IsNull || field.Siz < 8 {
+			return false
+		}
+		return testDoubleList(node, GetDouble(field.Value, 0))
+
+	case TypeText:
+		if field.IsNull {
+			return false
+		}
+		if s != nil {
+			return testInTextScratch(mdb, node, field.Value, s)
+		}
+		return mdb.testInText(node, field.Value)
+
+	case TypeMemo, TypeRepID:
+		if field.IsNull {
+			return false
+		}
+		var val string
+		if s != nil {
+			val = colToStringIn(mdb, col, field, page, s)
+		} else {
+			val = mdb.valueFromField(col, field)
+		}
+		return testStringList(node, val)
+
+	case TypeDateTime:
+		if field.IsNull || field.Siz < 8 {
+			return false
+		}
+		return testDoubleList(node, poorMansTrunc(GetDouble(field.Value, 0)))
+
+	default:
+		// Column types without comparison support never match IN.
+		return false
+	}
+}
+
+func testIntList(node *SargNode, val int) bool {
+	vals := node.InValues
+	if len(vals) == 0 {
+		return false
+	}
+	if node.inSorted {
+		i := sort.Search(len(vals), func(i int) bool { return vals[i].I >= val })
+		return i < len(vals) && vals[i].I == val
+	}
+	for i := range vals {
+		if vals[i].I == val {
+			return true
+		}
+	}
+	return false
+}
+
+func testDoubleList(node *SargNode, val float64) bool {
+	vals := node.InValues
+	if len(vals) == 0 {
+		return false
+	}
+	if node.inSorted {
+		i := sort.Search(len(vals), func(i int) bool { return vals[i].D >= val })
+		return i < len(vals) && vals[i].D == val
+	}
+	for i := range vals {
+		if vals[i].D == val {
+			return true
+		}
+	}
+	return false
+}
+
+func testStringList(node *SargNode, val string) bool {
+	for i := range node.InValues {
+		if node.InValues[i].S == val {
+			return true
+		}
+	}
+	return false
+}
+
+// testInTextScratch evaluates a text IN predicate with caller-owned scratch.
+// The field is decoded once and then compared against the precomputed
+// patterns, so a large list never re-decodes or allocates per element.
+func testInTextScratch(mdb *MdbHandle, node *SargNode, src []byte, s *decodeScratch) bool {
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return testInBytes(node, body)
+	}
+	buf := appendUnicodeUTF8(s.unicode[:0], src, mdb.IsJet4())
+	s.unicode = buf
+	return testInBytes(node, buf)
+}
+
+// testInText evaluates a text IN predicate using the handle's reusable
+// unicode buffer (synchronous path).
+func (mdb *MdbHandle) testInText(node *SargNode, src []byte) bool {
+	if body, ok := unicodeFastPath(src, mdb.IsJet4()); ok {
+		return testInBytes(node, body)
+	}
+	buf := appendUnicodeUTF8(mdb.unicodeBuf[:0], src, mdb.IsJet4())
+	mdb.unicodeBuf = buf
+	return testInBytes(node, buf)
+}
+
+// testInBytes compares decoded text against the precomputed IN patterns.
+func testInBytes(node *SargNode, s []byte) bool {
+	ps := node.InBytes
+	if len(ps) == 0 {
+		return false
+	}
+	if node.inSorted {
+		i := sort.Search(len(ps), func(i int) bool { return bytes.Compare(ps[i], s) >= 0 })
+		return i < len(ps) && bytes.Equal(ps[i], s)
+	}
+	for i := range ps {
+		if bytes.Equal(ps[i], s) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveInValues converts the raw IN literals captured by the parser into a
+// typed list for the target column. Conversion happens once per query;
+// elements that cannot represent a value of the column type are dropped
+// (they can never match). Lists larger than inLinearSearchMax are sorted and
+// deduplicated for binary-search evaluation.
+func resolveInValues(node *SargNode, col *MdbColumn) {
+	vals := node.InValues
+
+	switch col.ColType {
+	case TypeText, TypeMemo, TypeRepID:
+		// Every literal compares as text: quoted strings as-is, numeric
+		// literals as their raw text, TRUE/FALSE as "1"/"0".
+		node.ValType = TypeText
+		node.InBytes = make([][]byte, 0, len(vals))
+		for i := range vals {
+			node.InBytes = append(node.InBytes, []byte(vals[i].S))
+		}
+		if len(node.InBytes) > inLinearSearchMax {
+			sort.Slice(node.InBytes, func(i, j int) bool {
+				return bytes.Compare(node.InBytes[i], node.InBytes[j]) < 0
+			})
+			dedup := node.InBytes[:1]
+			for _, p := range node.InBytes[1:] {
+				if bytes.Compare(dedup[len(dedup)-1], p) != 0 {
+					dedup = append(dedup, p)
+				}
+			}
+			node.InBytes = dedup
+			node.inSorted = true
+		}
+
+	case TypeBool, TypeByte, TypeInt, TypeLongInt, TypeComplex:
+		node.ValType = TypeInt
+		out := vals[:0]
+		for i := range vals {
+			if node.InElemTypes[i] == TypeInt {
+				out = append(out, MdbAny{I: vals[i].I})
+				continue
+			}
+			if iv, err := strconv.Atoi(vals[i].S); err == nil {
+				out = append(out, MdbAny{I: iv})
+			}
+		}
+		node.InValues = out
+		if len(node.InValues) > inLinearSearchMax {
+			sort.Slice(node.InValues, func(i, j int) bool { return node.InValues[i].I < node.InValues[j].I })
+			dedup := node.InValues[:1]
+			for _, v := range node.InValues[1:] {
+				if dedup[len(dedup)-1].I == v.I {
+					continue
+				}
+				dedup = append(dedup, v)
+			}
+			node.InValues = dedup
+			node.inSorted = true
+		}
+
+	case TypeFloat, TypeDouble:
+		node.ValType = TypeDouble
+		out := vals[:0]
+		for i := range vals {
+			if node.InElemTypes[i] == TypeInt {
+				out = append(out, MdbAny{D: float64(vals[i].I)})
+				continue
+			}
+			if d, err := strconv.ParseFloat(vals[i].S, 64); err == nil {
+				out = append(out, MdbAny{D: d})
+			}
+		}
+		node.InValues = out
+		if len(node.InValues) > inLinearSearchMax {
+			sort.Slice(node.InValues, func(i, j int) bool { return node.InValues[i].D < node.InValues[j].D })
+			dedup := node.InValues[:1]
+			for _, v := range node.InValues[1:] {
+				if dedup[len(dedup)-1].D == v.D {
+					continue
+				}
+				dedup = append(dedup, v)
+			}
+			node.InValues = dedup
+			node.inSorted = true
+		}
+
+	case TypeDateTime:
+		// Mirrors the single-value rule: integer literals are Unix
+		// timestamps converted to date serials; float literals are serials.
+		node.ValType = TypeDouble
+		out := vals[:0]
+		for i := range vals {
+			if node.InElemTypes[i] == TypeInt {
+				t := time.Unix(int64(vals[i].I), 0).UTC()
+				out = append(out, MdbAny{D: TmToDate(t)})
+				continue
+			}
+			if d, err := strconv.ParseFloat(vals[i].S, 64); err == nil {
+				out = append(out, MdbAny{D: d})
+			}
+		}
+		node.InValues = out
+		if len(node.InValues) > inLinearSearchMax {
+			sort.Slice(node.InValues, func(i, j int) bool { return node.InValues[i].D < node.InValues[j].D })
+			dedup := node.InValues[:1]
+			for _, v := range node.InValues[1:] {
+				if dedup[len(dedup)-1].D == v.D {
+					continue
+				}
+				dedup = append(dedup, v)
+			}
+			node.InValues = dedup
+			node.inSorted = true
+		}
+
+	default:
+		// Unsupported column type: the predicate can never match.
+		node.InValues = nil
+		node.InBytes = nil
+		node.ValType = 0
+	}
+	node.InElemTypes = nil
 }
 
 // testSargStringIn evaluates a string sarg with caller-owned scratch.

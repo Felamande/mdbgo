@@ -55,6 +55,11 @@ type SQL struct {
 	LimitPercent bool
 	RowCount     int
 
+	// ORDER BY terms and materialized sorted rows (non-nil SortedRows means
+	// FetchRow serves rows from the sorted snapshot instead of the table).
+	OrderBy    []OrderTerm
+	SortedRows []sortedRow
+
 	// Error
 	ErrorMsg string
 	HasError bool
@@ -400,6 +405,24 @@ func (p *parser) parse() error {
 }
 
 func (p *parser) parseSelectStmt() error {
+	// Optional TOP N [PERCENT] — maps to the LIMIT machinery.
+	if tok := p.peek(); tok.typ == tokIdent && equalFold(tok.value, "TOP") {
+		p.next()
+		num := p.next()
+		if num.typ != tokNumber {
+			return fmt.Errorf("gomdb: expected number after TOP, got %v", num)
+		}
+		n, err := strconv.Atoi(num.value)
+		if err != nil {
+			return fmt.Errorf("gomdb: invalid TOP value: %q", num.value)
+		}
+		p.sql.Limit = n
+		if next := p.peek(); next.typ == tokIdent && equalFold(next.value, "PERCENT") {
+			p.next()
+			p.sql.LimitPercent = true
+		}
+	}
+
 	// Parse SELECT column list
 	if err := p.parseSelectList(); err != nil {
 		return err
@@ -643,6 +666,12 @@ func (p *parser) parseComparison() (*SargNode, error) {
 		}, nil
 	}
 
+	// Handle IN (value, value, ...)
+	if equalFold(nextTok.value, "IN") {
+		p.next() // consume IN
+		return p.parseInList(colName)
+	}
+
 	// Handle IS NULL / IS NOT NULL
 	if equalFold(nextTok.value, "IS") {
 		p.next()
@@ -792,19 +821,125 @@ func (p *parser) parseComparison() (*SargNode, error) {
 	}, nil
 }
 
-func (p *parser) parseOrderBy() error {
-	// Skip ORDER BY parsing — just consume tokens until LIMIT or EOF
+// parseInList parses the parenthesized literal list of an IN predicate.
+// Elements are kept as raw text (plus a TypeInt hint for TRUE/FALSE) and
+// converted to typed values later, once the target column is known.
+func (p *parser) parseInList(colName string) (*SargNode, error) {
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, err
+	}
+
+	node := &SargNode{
+		Op:     OpIn,
+		Parent: &SargNode{Value: MdbAny{S: colName}},
+	}
+
 	for {
-		tok := p.peek()
-		if tok.typ == tokEOF || tok.typ == tokSemicolon {
+		tok := p.next()
+		switch tok.typ {
+		case tokString:
+			s := tok.value
+			if len(s) >= 2 && s[0] == '\'' {
+				s = s[1 : len(s)-1] // strip quotes
+			}
+			node.InValues = append(node.InValues, MdbAny{S: s})
+			node.InElemTypes = append(node.InElemTypes, TypeText)
+		case tokNumber:
+			// Kept as raw text; conversion to the column type happens at
+			// resolve time (this also keeps 1.2.1.1-style dotted values
+			// textual — callers must quote dotted OIDs).
+			node.InValues = append(node.InValues, MdbAny{S: tok.value})
+			node.InElemTypes = append(node.InElemTypes, TypeDouble)
+		case tokIdent:
+			switch {
+			case equalFold(tok.value, "NULL"):
+				// NULL never equals anything, so it is dropped.
+				continue
+			case equalFold(tok.value, "TRUE"):
+				node.InValues = append(node.InValues, MdbAny{I: 1, S: "1"})
+				node.InElemTypes = append(node.InElemTypes, TypeInt)
+			case equalFold(tok.value, "FALSE"):
+				node.InValues = append(node.InValues, MdbAny{I: 0, S: "0"})
+				node.InElemTypes = append(node.InElemTypes, TypeInt)
+			default:
+				return nil, fmt.Errorf("gomdb: unsupported IN element %q", tok.value)
+			}
+		default:
+			return nil, fmt.Errorf("gomdb: expected value in IN list, got %v", tok)
+		}
+
+		sep := p.next()
+		if sep.typ == tokRParen {
 			break
 		}
-		if equalFold(tok.value, "LIMIT") || equalFold(tok.value, "WHERE") {
-			break
+		if sep.typ != tokComma {
+			return nil, fmt.Errorf("gomdb: expected , or ) in IN list, got %v", sep)
 		}
-		p.next()
+	}
+
+	if len(node.InValues) == 0 {
+		return nil, fmt.Errorf("gomdb: IN list cannot be empty")
+	}
+	return node, nil
+}
+
+func (p *parser) parseOrderBy() error {
+	tok := p.next()
+	if !equalFold(tok.value, "BY") {
+		return fmt.Errorf("gomdb: expected BY after ORDER, got %q", tok.value)
+	}
+
+	for {
+		term, err := p.parseOrderTerm()
+		if err != nil {
+			return err
+		}
+		p.sql.OrderBy = append(p.sql.OrderBy, *term)
+
+		if p.peek().typ == tokComma {
+			p.next()
+			continue
+		}
+		break
 	}
 	return nil
+}
+
+// parseOrderTerm parses one ORDER BY key: a column name or Len(column),
+// optionally followed by ASC/DESC.
+func (p *parser) parseOrderTerm() (*OrderTerm, error) {
+	tok := p.next()
+	if tok.typ != tokIdent {
+		return nil, fmt.Errorf("gomdb: expected ORDER BY column, got %v", tok)
+	}
+
+	term := &OrderTerm{Col: tok.value}
+	if equalFold(tok.value, "LEN") {
+		if p.peek().typ != tokLParen {
+			return nil, fmt.Errorf("gomdb: expected ( after Len in ORDER BY")
+		}
+		p.next() // (
+		col := p.next()
+		if col.typ != tokIdent {
+			return nil, fmt.Errorf("gomdb: expected column name inside Len(), got %v", col)
+		}
+		if close := p.next(); close.typ != tokRParen {
+			return nil, fmt.Errorf("gomdb: expected ) after Len(%s), got %v", col.value, close)
+		}
+		term.Col = col.value
+		term.IsLen = true
+	}
+
+	if next := p.peek(); next.typ == tokIdent {
+		switch {
+		case equalFold(next.value, "DESC"):
+			p.next()
+			term.Desc = true
+		case equalFold(next.value, "ASC"):
+			p.next()
+		}
+	}
+	return term, nil
 }
 
 func (p *parser) parseLimit() error {
@@ -897,6 +1032,14 @@ func (sql *SQL) mdbExecute() error {
 		sql.LimitPercent = false
 	}
 
+	// ORDER BY materializes the matching rows, sorts them, and switches
+	// FetchRow to serve from the sorted snapshot.
+	if len(sql.OrderBy) > 0 {
+		if err := mdb.materializeOrderBy(sql, table); err != nil {
+			return err
+		}
+	}
+
 	sql.CurTable = table
 
 	return nil
@@ -912,7 +1055,7 @@ func resolveSargColumns(node *SargNode, table *MdbTableDef) {
 		node.ilikePattern = strings.ToLower(node.Value.S)
 		node.ilikePatternSet = true
 		node.patternBytes = []byte(node.ilikePattern)
-	} else if IsRelationalOp(node.Op) && node.ValType == TypeText {
+	} else if IsRelationalOp(node.Op) && node.ValType == TypeText && node.Op != OpIn {
 		// Precompute the byte form of string comparison patterns once per
 		// query so per-row sarg evaluation never allocates.
 		node.patternBytes = []byte(node.Value.S)
@@ -924,8 +1067,10 @@ func resolveSargColumns(node *SargNode, table *MdbTableDef) {
 			if equalFold(col.Name, colName) {
 				node.Col = col
 
-				// Handle date column with integer value (UNIX timestamp → date)
-				if col.ColType == TypeDateTime && node.ValType == TypeInt {
+				if node.Op == OpIn {
+					resolveInValues(node, col)
+				} else if col.ColType == TypeDateTime && node.ValType == TypeInt {
+					// Handle date column with integer value (UNIX timestamp → date)
 					t := time.Unix(int64(node.Value.I), 0).UTC()
 					node.Value = MdbAny{D: TmToDate(t)}
 					node.ValType = TypeDouble
@@ -960,6 +1105,20 @@ func (sql *SQL) FetchRow() (bool, error) {
 	}
 	if sql.CurTable == nil {
 		return false, fmt.Errorf("gomdb: no current table")
+	}
+
+	// Sorted result sets are served from the materialized snapshot. The
+	// cursor is RowCount, so plan reuse only has to reset RowCount.
+	if sql.SortedRows != nil {
+		if sql.Limit >= 0 && sql.RowCount+1 > sql.Limit {
+			return false, nil
+		}
+		if sql.RowCount >= len(sql.SortedRows) {
+			return false, nil
+		}
+		sr := sql.SortedRows[sql.RowCount]
+		sql.RowCount++
+		return sql.Mdb.serveSortedRow(sql.CurTable, sr)
 	}
 
 	hasRow, err := sql.Mdb.FetchRow(sql.CurTable)
