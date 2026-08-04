@@ -77,3 +77,17 @@ func BenchmarkOdbcLmWhere(b *testing.B) {
 		db.Close()
 	}
 }
+
+// BenchmarkOdbcLmWhereParallel runs the same filtered scan concurrently:
+// every parallel worker opens its own ODBC connection per iteration, exactly
+// like BenchmarkOdbcLmWhere but with RunParallel.
+func BenchmarkOdbcLmWhereParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			db := lmDB(b)
+			scanAll(b, db, "SELECT * FROM [MibTree] WHERE ConsistentFileInfo > 0")
+			db.Close()
+		}
+	})
+}

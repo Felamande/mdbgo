@@ -60,3 +60,17 @@ func BenchmarkLmWhere(b *testing.B) {
 		db.Close()
 	}
 }
+
+// BenchmarkLmWhereParallel runs the same filtered scan concurrently: every
+// parallel worker opens its own connection per iteration, exactly like
+// BenchmarkQueryParallel in gomdb_bench_test.go.
+func BenchmarkLmWhereParallel(b *testing.B) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			db := lmDB(b)
+			scanAll(b, db, "SELECT * FROM [MibTree] WHERE ConsistentFileInfo > 0")
+			db.Close()
+		}
+	})
+}
